@@ -92,9 +92,76 @@ def test_install_verification_and_ca_bundle(tmp_path):
     )
 
 
+def test_certifi_fills_an_empty_system_store(monkeypatch, tmp_path):
+    import ssl
+    import sys
+    import types
+
+    bundle = tmp_path / "cacert.pem"
+    bundle.write_text("placeholder\n", encoding="utf-8")
+    module = types.ModuleType("certifi")
+    module.where = lambda: str(bundle)
+    monkeypatch.setitem(sys.modules, "certifi", module)
+
+    class _Store:
+        def __init__(self, count: int) -> None:
+            self.verify_mode = ssl.CERT_REQUIRED
+            self.check_hostname = True
+            self._count = count
+
+        def cert_store_stats(self) -> dict[str, int]:
+            return {"x509_ca": self._count}
+
+    def fake_context(cafile: str | None = None) -> _Store:
+        return _Store(0 if cafile is None else 3)
+
+    monkeypatch.setattr(ssl, "create_default_context", fake_context)
+    from silentblue.supply import load_ca
+
+    ready, note = load_ca(None)
+    assert ready is True
+    assert note == "ok"
+
+
+def test_a_mac_with_no_store_is_told_to_install_certificates(monkeypatch):
+    import sys
+
+    from silentblue.supply import system_ca_note
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    note = system_ca_note()
+    assert "Install Certificates.command" in note
+    assert "Leave SILENTBLUE_CA_BUNDLE unset" in note
+
+
 def test_missing_ca_override_is_reported(monkeypatch, tmp_path):
     monkeypatch.setenv("SILENTBLUE_CA_BUNDLE", str(tmp_path / "missing.pem"))
     assert ca_bundle_label(None) == "missing"
+    from silentblue.supply import load_ca
+
+    ready, note = load_ca(None)
+    assert ready is False
+    assert "SILENTBLUE_CA_BUNDLE is not a readable CA file" in note
+
+
+def test_osv_url_comes_from_the_environment(monkeypatch, tmp_path):
+    from silentblue.supply import osv_endpoint, preview_advisories
+
+    monkeypatch.setenv("SILENTBLUE_OSV_URL", "https://osv.example.test/v1/querybatch")
+    monkeypatch.setenv("SILENTBLUE_CA_BUNDLE", str(tmp_path / "missing.pem"))
+    url, host, source, note = osv_endpoint()
+    assert url == "https://osv.example.test/v1/querybatch"
+    assert host == "osv.example.test"
+    assert source == "SILENTBLUE_OSV_URL"
+    assert note == ""
+    text = preview_advisories(tmp_path)
+    assert "OSV URL: https://osv.example.test/v1/querybatch" in text
+    assert "CA bundle: missing" in text
+    assert "until the CA bundle loads" in text
+    monkeypatch.setenv("SILENTBLUE_OSV_URL", "http://api.osv.dev/v1/querybatch")
+    bad_url, _host, _source, bad_note = osv_endpoint()
+    assert bad_url == ""
+    assert "https://api.osv.dev/v1/querybatch" in bad_note
 
 
 def test_osv_fills_cvss_and_a_failed_query_exits_1(workspace, monkeypatch):

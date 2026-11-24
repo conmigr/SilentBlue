@@ -8,7 +8,7 @@ from collections.abc import Callable
 from silentblue.cost import dollars, rate_for
 from silentblue.errors import UsageError
 from silentblue.graph import CodeGraph
-from silentblue.model import ModelClient, ModelReply
+from silentblue.model import ModelClient, ModelReply, failure_label
 from silentblue.models import AppConfig, RunState
 
 
@@ -19,6 +19,9 @@ class StageContext:
         self.config = config
         self.client = client
         self.model_calls = 0
+        self.resumed_calls = 0
+        self.answered_calls = 0
+        self.call_failures: list[str] = []
         self.input_tokens = 0
         self.output_tokens = 0
         self.usage_known = True
@@ -30,7 +33,7 @@ class StageContext:
         self._local = threading.local()
         self.stop_event: threading.Event | None = None
         self.on_progress: Callable[[dict], None] | None = None
-        self.on_usage: Callable[[ModelReply | None, str, str], None] | None = None
+        self.on_usage: Callable[[ModelReply | None, str, str, str], None] | None = None
         self.store = None
 
     def should_stop(self) -> bool:
@@ -48,8 +51,10 @@ class StageContext:
 
         if self.client is None:
             self.degraded = True
+            self._local.failure = "call failed"
             return None
         self._local.refused = False
+        self._local.failure = ""
         with self._lock:
             if self._blocked():
                 self.budget_exhausted = True
@@ -58,12 +63,14 @@ class StageContext:
             self.model_calls += 1
         try:
             reply = self.client.complete(system, user)
-        except UsageError:
-            self._notify(None)
+        except UsageError as exc:
+            self._local.failure = failure_label(exc)
+            self._fail(self._local.failure)
             raise
-        except Exception:
+        except Exception as exc:
             self.degraded = True
-            self._notify(None)
+            self._local.failure = failure_label(exc)
+            self._fail(self._local.failure)
             return None
         return self._record(reply)
 
@@ -93,6 +100,7 @@ class StageContext:
 
     def note_loaded(self, state: RunState) -> None:
         self.model_calls = max(self.model_calls, state.model_calls)
+        self.resumed_calls = self.model_calls
         self.input_tokens = max(self.input_tokens, state.input_tokens)
         self.output_tokens = max(self.output_tokens, state.output_tokens)
         self.usage_known = self.usage_known and state.usage_known
@@ -110,6 +118,7 @@ class StageContext:
                 else:
                     self.input_tokens += reply.input_tokens
                     self.output_tokens += reply.output_tokens
+                    self.answered_calls += 1
                 if self._blocked():
                     self.budget_exhausted = True
                 recorded = reply
@@ -117,7 +126,12 @@ class StageContext:
         self._notify(recorded)
         return text
 
-    def _notify(self, reply: ModelReply | None) -> None:
+    def _fail(self, reason: str) -> None:
+        with self._lock:
+            self.call_failures.append(reason)
+        self._notify(None, reason)
+
+    def _notify(self, reply: ModelReply | None, failure: str = "") -> None:
         if self.on_usage is None:
             return
-        self.on_usage(reply, self.config.model.provider, self.config.model.name)
+        self.on_usage(reply, self.config.model.provider, self.config.model.name, failure)

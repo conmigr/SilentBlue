@@ -6,7 +6,7 @@ Silent Blue is a defensive security harness. It inventories a repository, looks 
 
 The default detect profile is deterministic: scope, detectors, deduplication, ranking, and report rendering make no model calls and leave source unchanged. The assess profile adds a bounded review through the provider named in `.env`. After a report exists, `deploy` reviews the edge, `remediate` writes a case file per confirmed source gap, and `validate` records a verdict from a read-only review.
 
-Run a review from the command line, or from the session prompt with `run`. The prompt is also what an agent drives: a slash command or a sentence that maps to one command, one repository at a time. Drafting and accepting a threat model happens in the prompt. A later command-line scan uses that acceptance. The full order is in [How to run](#how-to-run).
+Run a review from the command line, or from the session prompt with `run`. The prompt is also what an agent drives: a slash command or a sentence that maps to one command, one repository at a time. Drafting and accepting a threat model happens in the prompt. A later command-line scan uses that acceptance. The full order is in [How to run](#how-to-run). When a line is unexpected, use the [troubleshooting guide](docs/troubleshooting.md).
 
 Run every command from this directory. `python -m silentblue` is the command to use. A scan you are not authorized to run should not be started.
 
@@ -36,7 +36,7 @@ python -m silentblue estimate --repo examples/sample
 python -m silentblue scan --repo examples/sample
 ```
 
-`setup` checks Python, config, the state directory, and whether a CA bundle can be loaded. It makes no model call and does not call OSV. A ready detect setup prints `env file: absent`, `config: ok (detect)`, `state: ok`, `model_calls: 0`, `model provider: openai`, `assess key: absent`, and `ca bundle: ok`. The next lines are the estimate and scan commands for `examples/sample`.
+`setup` checks Python, config, the state directory, the OSV URL, and whether a CA bundle can be loaded. It makes no model call and does not call OSV. A ready detect setup prints `env file: absent`, `config: ok (detect)`, `state: ok`, `model_calls: 0`, `assess key: absent`, `Provider:`, `Model:`, `Endpoint:`, `ca bundle: ok`, and `osv url:` with the endpoint. It also prints `This check does not call the model.` `ca bundle: missing` is followed by the reason and the `.env` setting that fixes it. The next lines are the estimate and scan commands for `examples/sample`.
 
 `estimate` prints the file count and `model_calls: 0`. `scan` writes the report and leaves `examples/sample/app.py` unchanged. The sample query is built by concatenation, so the report contains one `sql-unparameterized` finding. Open:
 
@@ -64,7 +64,7 @@ python -m silentblue run --repo C:\path\to\repo
 
 The session runs a detect scan first. Stage lines look like `d0  completed`. An assess stage also prints `d4  running` while it waits. The scan replaces `<repo>/security-scan/findings.json` and writes Markdown, SARIF, HTML, and PDF beside it. Source stays unchanged. The prompt is `silentblue>` on the same line as your typing. On a terminal, the prompt, labels, stage ids, finding numbers, and slash commands use one blue. The rest stays the terminal default. Set `NO_COLOR` to turn the blue off.
 
-A sentence maps to the same tools as the slash commands. `show findings`, `scan osv`, and `accept the threat model` are enough, and a small typo such as `shwo findngs` still maps. When two tools are about equally close, the session prints `ask` and runs neither. `/status` prints a `next` line chosen from the threat-model state. The harness owns that step. The model does not.
+A question such as `what model am I using?` names the provider, model, endpoint, and price. It does not call the model. `why is the CA bundle missing?` is answered from the Python running the session. The same cases are written out in the [troubleshooting guide](docs/troubleshooting.md). The answer names that Python, the certificate-store result, and what still runs while the bundle is missing. A sentence maps to the same tools as the slash commands. `show findings`, `scan osv`, and `accept the threat model` are enough, and a small typo such as `shwo findngs` still maps. When two tools are about equally close, the session prints `ask` and runs neither. `/status` prints a `next` line chosen from the threat-model state. The harness owns that step. The model does not.
 
 `/model accept` and `/model assume` still run as soon as you type the slash form. The sentence forms ask `yes` or `no` first. Scans, deploy, and `/model draft assess` already ask. The next line has to be exactly `yes` or `no`. Text in a source file, a lockfile, an advisory, or the model's own reply is not that answer.
 
@@ -108,7 +108,7 @@ flowchart TD
 `/status` prints `threat model  none` and a `next` line. The opening scan is a detect report and `advisories` is `off`. Set the API key before step 3. These steps write one report that holds the detector gaps, the assess review, and the OSV rows, ordered by a threat model that cites those rows.
 
 1. Type `/status`.
-2. Type `/scan osv`. The session prints the resolved package count, the host `api.osv.dev`, and whether a CA bundle loaded, then asks `Continue? yes/no`. Type `yes`. Type `no` to leave the detect report unchanged.
+2. Type `/scan osv`. The session prints the OSV URL, the package count, and the CA bundle result, then asks `Continue? yes/no`. `CA bundle: missing` is followed by what to set in `.env`. Type `yes`. Type `no` to leave the detect report unchanged.
 3. Type `/model draft assess`. The session prints `estimated_cost_usd` and asks `Continue? yes/no`. Type `yes`. This spends one model call. It writes `security-scan/threat-model.json` and `threat-model.html` from the current findings, including the advisory rows, and adds the assumptions from that call. The copy in the repository stays a draft.
 4. Type `show model`. `/model` is the same command. Type `/model assume <text>` when you want another assumption. That changes the draft hash.
 5. Type `/model accept`. The hash is stored under the state directory, outside the repository. Findings stay open. An assess scan uses the model only after this step.
@@ -138,7 +138,7 @@ The accepted draft does not gain the advisory assets from this scan. Follow [New
 
 Pin, install-verification, and CA-bundle checks run on every detect scan, including the scan that opens the session. They read the tree and send nothing.
 
-OSV is off until you name it. Type `/scan osv`. The session prints the resolved package count, the host `api.osv.dev`, and whether a CA bundle loaded, then waits for `yes` or `no`. `no` leaves the last report as it was. `/scan assess osv` prints the cost estimate and that same preview, then waits once. `/scan assess` without `osv` stays offline.
+OSV is off until you name it. Type `/scan osv`. The session prints the OSV URL, where that URL came from, the resolved package count, and the CA bundle result, then waits for `yes` or `no`. `CA bundle: missing` is followed by the reason. A missing system store names the Python that cannot see certificates. On a Mac, run `Install Certificates.command` for that same Python, quit the session, and start it again. If `certifi` is installed for that Python and its file sits outside the repository, Silent Blue uses that file. On Windows, install Python from python.org and install the Windows root certificate updates. Leave `SILENTBLUE_CA_BUNDLE` unset after that. `no` leaves the last report as it was. `/scan assess osv` prints the cost estimate and that same preview, then waits once. `/scan assess` without `osv` stays offline.
 
 `/scan` and the scan that `run` starts stay offline. The scan that opens `run` keeps the OSV rows when the resolved packages match the last query, and the scan message says they were kept. That scan does not send a new query. When the packages changed, or the last query did not record the package set, the rows stay out and the message tells you to type `/scan osv`. A later `/scan` or `/scan assess` replaces `findings.json` and drops advisory rows unless that command also says `osv`. `/scan resume` finishes assess units already started. It does not send another query and it does not keep advisory rows. Run `/scan osv` again after it when you want them.
 
@@ -177,7 +177,7 @@ Accept the threat model from the prompt. A later one-shot `scan` or `scan --prof
 
 Every path below starts in this directory. Replace the sample paths with directories you maintain. The command line runs one command and exits. The session stays open at `silentblue>` until `/quit`. An agent uses that same prompt, with a slash command or a sentence, or the Python calls in [From code](#from-code).
 
-Detect and assess send no traffic unless the scan is run with `--osv` or `/scan osv`. That query is one batch request to `api.osv.dev`, and in the session it waits until you confirm. A pinned set larger than 1000 packages is split into further requests to the same host. `deploy` sends one GET to the URL you name, and only after you confirm.
+Detect and assess send no traffic unless the scan is run with `--osv` or `/scan osv`. That query is one batch request to `SILENTBLUE_OSV_URL`, and in the session it waits until you confirm. A pinned set larger than 1000 packages is split into further requests to the same host. `deploy` sends one GET to the URL you name, and only after you confirm.
 
 ### One repository
 
@@ -193,7 +193,7 @@ python -m silentblue remediate --repo C:\path\to\repo
 python -m silentblue validate --repo C:\path\to\repo
 ```
 
-`estimate` and the detect `scan` make no model call. `--osv` sends one batch request to `api.osv.dev` and makes no model call. `--profile assess` prints nothing and spends the model budget immediately, so run `estimate --profile assess` first when you want the cost before that scan. After the threat model is accepted in a session, the comprehensive one-shot is `scan --repo C:\path\to\repo --profile assess --osv`. `scan --profile assess` without `--osv` replaces the report and drops advisory rows. `remediate` and `validate` need the API key. `deploy` does not.
+`estimate` and the detect `scan` make no model call. `--osv` sends one batch request to `SILENTBLUE_OSV_URL` and makes no model call. `--profile assess` prints nothing and spends the model budget immediately, so run `estimate --profile assess` first when you want the cost before that scan. After the threat model is accepted in a session, the comprehensive one-shot is `scan --repo C:\path\to\repo --profile assess --osv`. `scan --profile assess` without `--osv` replaces the report and drops advisory rows. `remediate` and `validate` need the API key. `deploy` does not.
 
 Session. This is the diagram above.
 
@@ -374,7 +374,7 @@ python -m silentblue ingest --repo examples/sample --sarif examples/sample/secur
 python -m silentblue gc
 ```
 
-`doctor` repeats the setup checks and makes no network call. `batch` runs a detect scan for each path in the list. Blank lines and lines that start with `#` are skipped. `ingest` reads a SARIF 2.1.0 file. Use the `*_report.sarif` file from the scan you just ran. `gc` prunes old checkpoints and leaves reports on disk.
+`doctor` repeats the setup checks, including the model route, and makes no network call. The [troubleshooting guide](docs/troubleshooting.md) starts from that output. `batch` runs a detect scan for each path in the list. Blank lines and lines that start with `#` are skipped. `ingest` reads a SARIF 2.1.0 file. Use the `*_report.sarif` file from the scan you just ran. `gc` prunes old checkpoints and leaves reports on disk.
 
 Artifacts land in `<repo>/security-scan/`:
 
@@ -441,13 +441,13 @@ An assess run still reads source when the model names no controls. The report is
 | 2    | The config, scope, path, or a missing assess credential refused the run |
 
 
-An empty scope exits 2 and writes no report. A symlinked `security-scan` directory exits 2 and is not followed.
+An empty scope exits 2 and writes no report. A symlinked `security-scan` directory exits 2 and is not followed. The meaning of each failure line is in the [troubleshooting guide](docs/troubleshooting.md).
 
 ## Configuration
 
 The detect profile ships with the package. `--config` must point at a file outside the repository. A `config.local.yaml` beside that file overrides it and must also live outside the repository. A `config.yaml` discovered inside the repository is ignored.
 
-`advisories: osv` in that config turns on the OSV query for a one-shot `scan`. The session stays offline until `/scan osv` or `/scan assess osv`. `SILENTBLUE_CA_BUNDLE` names a CA file outside the repository being scanned. When it is unset, the query uses the system bundle.
+`advisories: osv` in that config turns on the OSV query for a one-shot `scan`. The session stays offline until `/scan osv` or `/scan assess osv`. `SILENTBLUE_OSV_URL` in `.env` is the HTTPS endpoint that query POSTs to. When it is unset, the query uses `https://api.osv.dev/v1/querybatch`. `SILENTBLUE_CA_BUNDLE` names a CA file outside the repository being scanned. When it is unset, the query uses the system bundle. `setup` prints `ca bundle: missing` and the fix when that bundle cannot be loaded.
 
 Scope defaults skip VCS metadata, virtual environments, `node_modules`, build outputs, and files larger than 512 KiB. Directory links, including Windows junctions, are never followed. File links are inventoried only when `scope.follow_symlinks` is true and the target stays inside the repository. The default is false.
 

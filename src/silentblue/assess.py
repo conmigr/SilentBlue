@@ -359,10 +359,20 @@ def _review_unit(
                 rule_id=f"assessment-{unit.control_family}",
                 file=unit.paths[0],
                 line=1,
-                reason="budget" if getattr(ctx._local, "refused", False) else "unparseable",
+                reason=_miss_reason(ctx),
             )
         )
         return unit.unit_id, found, lost, not getattr(ctx._local, "refused", False)
+    if not parsed.gaps:
+        lost.append(
+            DroppedFinding(
+                rule_id=f"assessment-{unit.control_family}",
+                file=unit.paths[0],
+                line=1,
+                reason="empty",
+            )
+        )
+        return unit.unit_id, found, lost, True
     limit = 8 if unit.control_family == _REVIEW else 5
     for gap in parsed.gaps[:limit]:
         playbook = playbook_for(gap.playbook) or playbook_for(gap.control_family)
@@ -411,7 +421,7 @@ def _review_pending(
     )
     parsed = _ask(ctx, user, _ReviewDraft)
     if parsed is None:
-        return None, _drop(finding, "budget" if ctx.budget_exhausted else "unparseable")
+        return None, _drop(finding, _miss_reason(ctx))
     verdict = parsed.verdict.strip().lower()
     if verdict not in {"confirmed", "rejected", "inconclusive"}:
         ctx.degraded = True
@@ -458,27 +468,174 @@ def _ask(ctx: StageContext, user: str, model: type[BaseModel]) -> BaseModel | No
     return parsed
 
 
+def _miss_reason(ctx: StageContext) -> str:
+    """Why one review produced no object. A refused call is the budget."""
+
+    if getattr(ctx._local, "refused", False) or ctx.budget_exhausted:
+        return "budget"
+    failure = getattr(ctx._local, "failure", "")
+    if isinstance(failure, str) and failure:
+        return failure
+    return "unparseable"
+
+
 def _validate(raw: str | None, model: type[BaseModel]) -> BaseModel | None:
     if raw is None:
         return None
     try:
-        return model.model_validate(_parse_json_object(raw))
-    except (ValueError, ValidationError, json.JSONDecodeError):
+        payload = _coerce(model, _parse_json_object(raw))
+    except (ValueError, json.JSONDecodeError):
         return None
+    try:
+        return model.model_validate(payload)
+    except ValidationError:
+        if model is not _GapList or not isinstance(payload.get("gaps"), list):
+            return None
+        kept: list[_GapDraft] = []
+        for item in payload["gaps"]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                kept.append(_GapDraft.model_validate(item))
+            except ValidationError:
+                continue
+        if not kept:
+            return None
+        return _GapList(gaps=kept)
 
 
 def _parse_json_object(text: str) -> dict:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("no json object")
-    data = json.loads(cleaned[start : end + 1])
-    if not isinstance(data, dict):
-        raise ValueError("not an object")
+    """Read the last JSON object in a reply. A fenced block is preferred."""
+
+    fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+    candidates = [block for block in reversed(fenced) if block.strip()]
+    candidates.append(text)
+    last_error: Exception = ValueError("no json object")
+    for candidate in candidates:
+        for blob in reversed(_objects_in(candidate)):
+            for attempt in (blob, _strip_trailing_commas(blob)):
+                try:
+                    data = json.loads(attempt)
+                except json.JSONDecodeError as exc:
+                    last_error = exc
+                    continue
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, list):
+                    return {"gaps": data, "objectives": data}
+    raise last_error
+
+
+def _objects_in(text: str) -> list[str]:
+    found: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "{":
+            index += 1
+            continue
+        end = _match_brace(text, index)
+        if end is None:
+            index += 1
+            continue
+        found.append(text[index:end])
+        index = end
+    return found
+
+
+def _match_brace(text: str, start: int) -> int | None:
+    depth = 0
+    quoted = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if quoted:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _strip_trailing_commas(text: str) -> str:
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def _coerce(model: type[BaseModel], payload: dict) -> dict:
+    data = dict(payload)
+    if model is _GapList:
+        gaps = data.get("gaps")
+        if not isinstance(gaps, list):
+            for key in ("findings", "candidates", "issues", "results"):
+                if isinstance(data.get(key), list):
+                    gaps = data[key]
+                    break
+        if isinstance(gaps, list):
+            data["gaps"] = [_normalize_gap(item) for item in gaps if isinstance(item, dict)]
+    elif model is _ObjectiveList:
+        objectives = data.get("objectives")
+        if not isinstance(objectives, list):
+            for key in ("controls", "items", "results"):
+                if isinstance(data.get(key), list):
+                    objectives = data[key]
+                    break
+        if isinstance(objectives, list):
+            data["objectives"] = objectives
+    elif model is _ReviewDraft:
+        if "verdict" not in data and isinstance(data.get("decision"), str):
+            data["verdict"] = data["decision"]
     return data
+
+
+def _normalize_gap(item: dict) -> dict:
+    names = {
+        "file": ("file", "path", "filepath", "file_path", "filename"),
+        "line": ("line", "line_number", "lineno", "line_no"),
+        "control_family": ("control_family", "family"),
+        "playbook": ("playbook", "playbook_id"),
+        "title": ("title", "name"),
+        "description": ("description", "detail", "details", "evidence"),
+        "remediation": ("remediation", "repair", "fix"),
+        "severity": ("severity", "level"),
+        "confidence": ("confidence",),
+    }
+    out = dict(item)
+    for target, keys in names.items():
+        if out.get(target) not in (None, ""):
+            continue
+        for key in keys:
+            if item.get(key) not in (None, ""):
+                out[target] = item[key]
+                break
+    if "line" in out:
+        out["line"] = _as_line(out["line"])
+    if not str(out.get("description") or "").strip():
+        out["description"] = str(out.get("title") or "control gap")
+    if not str(out.get("title") or "").strip():
+        out["title"] = str(out.get("playbook") or out.get("control_family") or "control gap")
+    return out
+
+
+def _as_line(value: object) -> object:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        match = re.search(r"\d+", value)
+        if match is not None:
+            return int(match.group())
+    return value
 
 
 def _unit_playbooks(unit: WorkUnit) -> list[Playbook]:

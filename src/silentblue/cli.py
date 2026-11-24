@@ -20,6 +20,7 @@ from silentblue.redact import configure_logging, redact
 from silentblue.remediate import run_remediate
 from silentblue.cost import format_usd
 from silentblue.report import parse_formats
+from silentblue.model import configured_model, route_status
 from silentblue.runner import estimate_repo, resolve_state_dir, run_scan
 from silentblue.session import run_session
 from silentblue.validate import run_validate
@@ -343,13 +344,24 @@ def _readiness(
         lines.append(f"state: {exc}")
         return 1, "\n".join(lines)
     lines.append("model_calls: 0")
-    provider = os.environ.get("SILENTBLUE_PROVIDER", "").strip() or "openai"
-    lines.append(f"model provider: {provider}")
     key_state = "present" if os.environ.get("SILENTBLUE_API_KEY", "").strip() else "absent"
     lines.append(f"assess key: {key_state}")
-    from silentblue.supply import ca_bundle_label
+    try:
+        lines.extend(route_status(configured_model(loaded.model)))
+    except SilentBlueError as exc:
+        lines.append(f"model: {exc}")
+    lines.append("This check does not call the model.")
+    from silentblue.supply import ca_bundle_label, load_ca, osv_endpoint
 
     lines.append(f"ca bundle: {ca_bundle_label(None)}")
+    ready, note = load_ca(None)
+    if not ready:
+        lines.append(note)
+    url, _host, source, url_note = osv_endpoint()
+    if url:
+        lines.append(f"osv url: {url} ({source})")
+    else:
+        lines.append(f"osv url: missing. {url_note}")
     return 0, "\n".join(lines)
 
 

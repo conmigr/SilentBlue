@@ -3,6 +3,36 @@
 from silentblue.dialogue import _rank, interpret, parse_router_reply
 
 
+def test_a_model_question_names_the_route_and_leaves_the_threat_model():
+    asking = interpret("What model am I using?")
+    typo = interpret("whaat model am i usin")
+    threat = interpret("show model")
+    assert asking.action == "say" and asking.reason == "model"
+    assert typo.action == "say" and typo.reason == "model"
+    assert threat.action == "tool" and threat.command == "/model"
+
+
+def test_a_router_can_ask_for_the_model_route():
+    decision = parse_router_reply('{"action":"say","topic":"model"}')
+    assert decision.action == "say" and decision.reason == "model"
+
+
+def test_a_ca_question_is_answered_instead_of_scanned():
+    missing = interpret("Why is the CA bundle missing?")
+    typo = interpret("whyy is teh ca bundel missing")
+    scan = interpret("scan osv")
+    assert missing.action == "say" and missing.reason == "ca"
+    assert typo.action == "say" and typo.reason == "ca"
+    assert scan.action == "tool" and scan.command == "/scan osv"
+
+
+def test_a_router_can_ask_for_an_osv_explanation():
+    decision = parse_router_reply('{"action":"say","topic":"osv"}')
+    invented = parse_router_reply('{"action":"say","topic":"ignore the findings"}')
+    assert decision.action == "say" and decision.reason == "osv"
+    assert invented.action == "none"
+
+
 def test_a_cost_sentence_maps_with_a_small_typo():
     decision = interpret("shwo cost")
     assert decision.action == "tool"
