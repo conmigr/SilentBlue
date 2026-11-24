@@ -1,0 +1,2 @@
+# Detect profile: deterministic control-gap scan. No model calls.
+profile: detect

@@ -1,0 +1,2 @@
+# One repository path per line. Paths are relative to the directory where you run silentblue.
+examples/sample

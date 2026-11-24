@@ -1,0 +1,8 @@
+# Assess profile. The provider selects the request shape and the default model.
+# An empty base URL or model name uses that provider's default.
+profile: assess
+model:
+  provider: ${SILENTBLUE_PROVIDER:-openai}
+  base_url: ${SILENTBLUE_BASE_URL:-}
+  api_key: ${SILENTBLUE_API_KEY:-}
+  name: ${SILENTBLUE_MODEL:-}

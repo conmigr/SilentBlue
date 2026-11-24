@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "silentblue"
+version = "0.9.0"
+description = "Defensive security harness for control-gap detection, ranking, reporting, review, and operations."
+readme = "README.md"
+authors = [{ name = "Jason Bevis" }]
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "pydantic>=2.6,<3",
+    "PyYAML>=6.0,<7",
+    "typer>=0.12,<1",
+    "rich>=13.7,<15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+silentblue = "silentblue.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+silentblue = ["profiles/*.yaml", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

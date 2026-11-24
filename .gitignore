@@ -1,0 +1,16 @@
+.env
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+run_manifest_*.json
+.silentblue/
+security-scan/
+security-remediation/
