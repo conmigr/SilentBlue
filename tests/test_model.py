@@ -60,6 +60,7 @@ def test_chat_providers_share_one_request_shape():
         assert headers["Authorization"] == "Bearer test-key"
         assert body["messages"][0] == {"role": "system", "content": "system text"}
         assert body["messages"][1] == {"role": "user", "content": "user text"}
+        assert body["response_format"] == {"type": "json_object"}
         assert "temperature" not in body
 
 

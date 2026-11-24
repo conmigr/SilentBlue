@@ -15,7 +15,7 @@ from silentblue.dialogue import ROUTER_SYSTEM, Decision, interpret, parse_router
 from silentblue.deploy import deploy_preview, run_deploy
 from silentblue.errors import SilentBlueError
 from silentblue.ledger import SessionLedger
-from silentblue.model import ModelReply
+from silentblue.model import ModelReply, configured_model, failure_label, route_status
 from silentblue.models import FinalReport, Finding
 from silentblue.report import finding_fields, finding_sections
 from silentblue.runner import (
@@ -65,6 +65,8 @@ show model            Same as /model
 /quit                 Leave the session. A running scan stops after units already started
 
 A sentence works in place of a command. Small typos still map to the same tool.
+Ask what model am I using, why the CA bundle is missing, or why OSV did not run.
+The model question names the provider, model, and endpoint. It does not call the model.
 A request to drop a finding or change the mission is refused.
 """
 
@@ -157,6 +159,9 @@ class Session:
             return False
         if decision.action == "ask":
             self.writer(f"ask  {decision.text}")
+            return False
+        if decision.action == "say":
+            self._say(decision.reason)
             return False
         if decision.action != "tool" or not decision.command:
             self.writer("I didn't catch that. Type /help")
@@ -380,11 +385,12 @@ class Session:
                 resume=resume,
                 osv=osv,
                 retain_advisories=retain_advisories,
-                on_usage=lambda reply, provider, model: self.ledger.add(
+                on_usage=lambda reply, provider, model, failure="": self.ledger.add(
                     "assess" if profile == "assess" else "scan",
                     reply,
                     provider,
                     model,
+                    failure,
                 ),
                 client=self.client if profile == "assess" else None,
                 on_status=on_status,
@@ -522,6 +528,59 @@ class Session:
         self.writer(f"advisories  {advisories}")
         self.writer(f"threat model  {status}")
         self.writer(f"next  {_next_step(status)}")
+        for line in self._route_lines():
+            self.writer(line)
+
+    def _route_lines(self) -> list[str]:
+        try:
+            loaded = load_config(None, Path.cwd(), self.repo.expanduser().resolve())
+            model = configured_model(loaded.model)
+        except SilentBlueError as exc:
+            return [f"error: {exc}"]
+        return [*route_status(model), self.ledger.activity()]
+
+    def _say(self, topic: str) -> None:
+        if topic == "model":
+            for line in self._route_lines():
+                self.writer(line)
+            return
+        import sys
+
+        from silentblue.supply import load_ca, osv_endpoint
+
+        root = self.repo.expanduser().resolve()
+        ready, note = load_ca(root)
+        self.writer(f"Python: {sys.executable}")
+        if ready:
+            self.writer(
+                "CA bundle: ok. This Python can see the certificate store. "
+                "The OSV query can use it. Leave SILENTBLUE_CA_BUNDLE unset."
+            )
+        else:
+            self.writer("CA bundle: missing.")
+            self.writer(note)
+            self.writer(
+                "While it is missing, the OSV request is not sent. "
+                "Detect findings are still written, and advisories stay degraded."
+            )
+            self.writer(
+                "In a terminal, python3 -m silentblue doctor prints the same result. "
+                "python and python3 matter only when those commands print different paths."
+            )
+        if topic != "osv":
+            return
+        url, _host, source, url_note = osv_endpoint()
+        if url:
+            self.writer(f"OSV URL: {url}")
+            self.writer(f"OSV source: {source}")
+        else:
+            self.writer(f"OSV URL: missing. {url_note}")
+        advisories = "off" if self.report is None else self.report.advisories
+        self.writer(f"Advisories: {advisories}")
+        if self.report is not None and self.report.advisory_note:
+            self.writer(self.report.advisory_note)
+        if advisories == "off":
+            self.writer("This report has not kept an OSV query. Type /scan osv and then yes.")
 
     def _cost(self) -> None:
         if self._busy():
@@ -578,12 +637,15 @@ class Session:
             f"Files:\n{listed}\n\nFindings:\n{gaps}\n\n"
             'Return JSON {"assumptions": ["..."], "assets": [{"name", "files", "expected_control"}]}.'
         )
+        provider = config.model.provider
+        name = config.model.name
         try:
             reply = client.complete(
                 "You map assets and trust boundaries for a defensive review. Return one JSON object.",
                 user,
             )
         except SilentBlueError as exc:
+            self.ledger.add("threat-model", None, provider, name, failure_label(exc))
             self.writer(f"error: {exc}")
             return model
         text = reply.text if isinstance(reply, ModelReply) else str(reply)

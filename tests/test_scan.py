@@ -231,3 +231,6 @@ def test_cli_estimate_and_scan(workspace):
     assert doctor.exit_code == 0
     assert "model_calls: 0" in doctor.stdout
     assert "config: ok (detect)" in doctor.stdout
+    assert "Provider:" in doctor.stdout
+    assert "Endpoint:" in doctor.stdout
+    assert "This check does not call the model." in doctor.stdout

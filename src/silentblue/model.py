@@ -7,6 +7,7 @@ completions shape. Anthropic uses the messages shape.
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -140,6 +141,75 @@ def resolve_model(settings: ModelConfig) -> ModelConfig:
     )
 
 
+def configured_model(settings: ModelConfig) -> ModelConfig:
+    """Apply the operator environment, then the provider default. No network call."""
+
+    updates: dict[str, str] = {}
+    if os.environ.get("SILENTBLUE_PROVIDER"):
+        updates["provider"] = os.environ["SILENTBLUE_PROVIDER"]
+    if not settings.api_key and os.environ.get("SILENTBLUE_API_KEY"):
+        updates["api_key"] = os.environ["SILENTBLUE_API_KEY"]
+    if os.environ.get("SILENTBLUE_BASE_URL"):
+        updates["base_url"] = os.environ["SILENTBLUE_BASE_URL"]
+    if os.environ.get("SILENTBLUE_MODEL"):
+        updates["name"] = os.environ["SILENTBLUE_MODEL"]
+    if updates:
+        settings = settings.model_copy(update=updates)
+    return resolve_model(settings)
+
+
+def route_status(settings: ModelConfig) -> list[str]:
+    """Describe the model the next assess call will use. No network call."""
+
+    resolved = resolve_model(settings)
+    endpoint = _endpoint(resolved)
+    key = "present" if resolved.api_key.strip() else "absent"
+    lines = [
+        f"Provider: {resolved.provider}",
+        f"Model: {resolved.name}",
+        f"Endpoint: {endpoint}",
+        f"Assess key: {key}",
+    ]
+    try:
+        from silentblue.cost import rate_for
+
+        rate = rate_for(resolved.provider, resolved.name)
+    except UsageError as exc:
+        lines.append(str(exc))
+        return lines
+    if rate is None:
+        lines.append(
+            "Price: unknown. Set SILENTBLUE_PRICE_INPUT_PER_MILLION and "
+            "SILENTBLUE_PRICE_OUTPUT_PER_MILLION in .env."
+        )
+    else:
+        lines.append(
+            f"Price: {rate[0]} USD per million input tokens, "
+            f"{rate[1]} USD per million output tokens."
+        )
+    if resolved.provider == "gemini" and "/openai" in endpoint:
+        lines.append(
+            "Gemini uses this OpenAI-compatible endpoint. "
+            "Set SILENTBLUE_MODEL to choose Flash. Leave SILENTBLUE_BASE_URL unset."
+        )
+    return lines
+
+
+def failure_label(exc: BaseException) -> str:
+    """A short reason for a model call that did not return text."""
+
+    text = str(exc)
+    if "rejected the credential" in text:
+        return "credential"
+    if "unreachable" in text:
+        return "unreachable"
+    if "returned an error" in text:
+        return "endpoint error"
+    if "reply was empty" in text:
+        return "empty reply"
+    return "call failed"
+
+
 def build_request(settings: ModelConfig, system: str, user: str) -> tuple[str, dict[str, str], dict]:
     """Return the URL, headers, and JSON body for one completion."""
 
@@ -168,6 +238,7 @@ def build_request(settings: ModelConfig, system: str, user: str) -> tuple[str, d
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            "response_format": {"type": "json_object"},
         }
     return _endpoint(resolved), headers, body
 
@@ -277,6 +348,6 @@ def _flatten(content: object) -> str:
         if isinstance(item, str):
             parts.append(item)
         elif isinstance(item, dict) and isinstance(item.get("text"), str):
-            if item.get("type") in {None, "text"}:
+            if item.get("type") in {None, "text", "output_text"}:
                 parts.append(item["text"])
     return "".join(parts)

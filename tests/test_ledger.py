@@ -20,6 +20,7 @@ def test_cost_matrix_keeps_scan_assess_and_nlp_apart():
     assert "Work: assess" in text
     assert "Work: nlp" in text
     assert "Model: none" in text
+    assert "Thinking is unknown. This model sent no reasoning count." in text
 
 
 def test_a_missing_token_count_leaves_that_cost_unknown():
@@ -28,3 +29,15 @@ def test_a_missing_token_count_leaves_that_cost_unknown():
     text = "\n".join(ledger.render())
     assert "Total USD: unknown" in text
     assert "threat-model: unknown USD, calls 1, in unknown, out unknown, thinking unknown" in text
+    assert "SILENTBLUE_PRICE_INPUT_PER_MILLION" not in text
+
+
+def test_an_unlisted_model_names_the_price_settings():
+    ledger = SessionLedger()
+    ledger.add("assess", ModelReply("review", 10, 4, None), "gemini", "gemini-3.5-flash")
+    text = "\n".join(ledger.render())
+    assert "USD is unknown for gemini gemini-3.5-flash" in text
+    assert "SILENTBLUE_PRICE_INPUT_PER_MILLION" in text
+    assert "SILENTBLUE_PRICE_OUTPUT_PER_MILLION" in text
+    assert "Thinking is unknown. This model sent no reasoning count." in text
+    assert ledger.activity() == "This session: 1 call returned tokens."

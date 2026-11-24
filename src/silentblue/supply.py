@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import re
 import ssl
 import tomllib
@@ -27,8 +28,49 @@ KEPT_NOTE = "Kept from the last OSV query. Resolved packages are unchanged."
 CHANGED_NOTE = "OSV rows were not kept. The resolved packages changed. Type /scan osv."
 UNRECORDED_NOTE = "OSV rows were not kept. The last query did not record the package set. Type /scan osv."
 
-_OSV_URL = "https://api.osv.dev/v1/querybatch"
-_OSV_HOST = "api.osv.dev"
+_DEFAULT_OSV_URL = "https://api.osv.dev/v1/querybatch"
+
+
+def system_ca_note() -> str:
+    """Tell the operator how to give this Python a CA store. No network."""
+
+    base = (
+        f"No CA certificates are visible to {sys.executable}, so OSV cannot be contacted."
+        " Certificates installed for a different Python are not used."
+        " Quit this session and start it again after fixing this Python."
+    )
+    if sys.platform == "darwin":
+        return (
+            base
+            + " On a Mac, open Applications, open the Python folder for this same Python,"
+            + " and double-click Install Certificates.command."
+            + " Leave SILENTBLUE_CA_BUNDLE unset."
+        )
+    if sys.platform == "win32":
+        return (
+            base
+            + " Install Python from python.org and install Windows root certificate updates."
+            + " Quit Silent Blue and start it again. Leave SILENTBLUE_CA_BUNDLE unset."
+        )
+    return (
+        base
+        + " Install this operating system's CA certificates for Python."
+        + " Quit Silent Blue and start it again. Leave SILENTBLUE_CA_BUNDLE unset."
+    )
+
+
+_CA_FILE = (
+    "SILENTBLUE_CA_BUNDLE is not a readable CA file. "
+    "Set it to a certificate bundle outside the repository."
+)
+_CA_INSIDE = (
+    "SILENTBLUE_CA_BUNDLE points inside the repository. "
+    "Move the CA file outside the repository and update .env."
+)
+_CA_INVALID = (
+    "SILENTBLUE_CA_BUNDLE could not be loaded as a CA bundle. "
+    "Use a PEM bundle of CA certificates that sits outside the repository."
+)
 _BATCH = 1000
 _TIMEOUT_S = 20
 _MAX_BODY = 2_000_000
@@ -110,6 +152,14 @@ def apply_advisories(state: RunState, *, fetch=None) -> RunState:
                 "advisory_note": note,
             }
         )
+    url, _host, _source, url_note = osv_endpoint()
+    if url_note:
+        return state.model_copy(
+            update={
+                "advisories": "degraded",
+                "advisory_note": url_note,
+            }
+        )
     packages = _advisory_packages(root, state.scope)
     fingerprint = fingerprint_packages(packages)
     if not packages:
@@ -135,7 +185,11 @@ def apply_advisories(state: RunState, *, fetch=None) -> RunState:
         return state.model_copy(
             update={
                 "advisories": "degraded",
-                "advisory_note": "OSV could not be reached.",
+                "advisory_note": (
+                    f"OSV could not be reached at {url}. "
+                    "Check that this machine can open that HTTPS address. "
+                    "Certificate verification stays on. The query waits 20 seconds."
+                ),
             }
         )
     findings = list(state.findings)
@@ -200,14 +254,24 @@ def preview_advisories(repo: Path) -> str:
     root = repo.expanduser().resolve()
     scope = collect_scope(root, ScopeConfig(), extra_exclude_dirs={"security-scan"})
     pinned = _advisory_packages(root, scope)
-    ready, _note = load_ca(root)
-    ca = "ok" if ready else "missing"
-    return (
-        "advisories  osv\n"
-        f"packages  {len(pinned)}\n"
-        f"host  {_OSV_HOST}\n"
-        f"ca bundle  {ca}"
-    )
+    ready, ca_note = load_ca(root)
+    url, _host, source, url_note = osv_endpoint()
+    lines = [
+        f"OSV URL: {url or 'missing'}",
+        f"OSV source: {source}",
+        f"Packages: {len(pinned)}",
+        f"CA bundle: {'ok' if ready else 'missing'}",
+    ]
+    if url_note:
+        lines.append(url_note)
+    if not ready:
+        lines.append(ca_note)
+        lines.append("The advisory check will not complete until the CA bundle loads.")
+    elif not pinned:
+        lines.append(
+            "No resolved or pinned packages were found. A version range is sent only when a lockfile resolves it."
+        )
+    return "\n".join(lines)
 
 
 def ca_bundle_label(repo: Path | None) -> str:
@@ -220,36 +284,97 @@ def ca_bundle_label(repo: Path | None) -> str:
 def load_ca(repo: Path | None) -> tuple[bool, str]:
     """Return whether a CA bundle can be loaded for an advisory query."""
 
+    context, note = ca_context(repo)
+    return context is not None, "ok" if context is not None else note
+
+
+def ca_context(repo: Path | None) -> tuple[ssl.SSLContext | None, str]:
+    """Return a verifying context for this Python, or the reason none is available."""
+
     override = os.environ.get("SILENTBLUE_CA_BUNDLE", "").strip()
     if override:
         path = Path(override).expanduser()
         if is_reparse_point(path) or not path.is_file():
-            return False, "CA bundle could not be loaded."
-        if repo is not None:
-            try:
-                resolved = path.resolve()
-            except OSError:
-                return False, "CA bundle could not be loaded."
-            if is_within(repo.resolve(), resolved):
-                return False, "CA bundle must sit outside the repository."
-        try:
-            context = ssl.create_default_context(cafile=str(path))
-        except (OSError, ssl.SSLError):
-            return False, "CA bundle could not be loaded."
-        if context.cert_store_stats().get("x509_ca", 0) <= 0:
-            return False, "CA bundle could not be loaded."
-        if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
-            return False, "CA bundle could not be loaded."
-        return True, "ok"
+            return None, _CA_FILE
+        if not _outside_repo(repo, path):
+            return None, _CA_INSIDE
+        context = _context_from(path)
+        return (context, "ok") if context is not None else (None, _CA_INVALID)
     try:
         context = ssl.create_default_context()
     except (OSError, ssl.SSLError):
-        return False, "CA bundle could not be loaded."
-    if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
-        return False, "CA bundle could not be loaded."
-    if context.cert_store_stats().get("x509_ca", 0) <= 0:
-        return False, "CA bundle could not be loaded."
-    return True, "ok"
+        context = None
+    if _usable(context):
+        return context, "ok"
+    certifi_path = _certifi_bundle(repo)
+    if certifi_path is not None:
+        context = _context_from(certifi_path)
+        if context is not None:
+            return context, "ok"
+    return None, system_ca_note()
+
+
+def _context_from(path: Path) -> ssl.SSLContext | None:
+    try:
+        context = ssl.create_default_context(cafile=str(path))
+    except (OSError, ssl.SSLError):
+        return None
+    return context if _usable(context) else None
+
+
+def _usable(context: ssl.SSLContext | None) -> bool:
+    if context is None:
+        return False
+    try:
+        count = context.cert_store_stats().get("x509_ca", 0)
+    except (AttributeError, OSError, ssl.SSLError):
+        return False
+    return context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname and count > 0
+
+
+def _certifi_bundle(repo: Path | None) -> Path | None:
+    """Use certifi when this Python's default store is empty and the file is outside the repo."""
+
+    try:
+        import certifi
+    except ImportError:
+        return None
+    path = Path(str(certifi.where())).expanduser()
+    if is_reparse_point(path) or not path.is_file() or not _outside_repo(repo, path):
+        return None
+    return path
+
+
+def _outside_repo(repo: Path | None, path: Path) -> bool:
+    if repo is None:
+        return True
+    try:
+        return not is_within(repo.resolve(), path.resolve())
+    except OSError:
+        return False
+
+
+def osv_endpoint() -> tuple[str, str, str, str]:
+    """Return the query URL, its host, where it came from, and an error note."""
+
+    configured = os.environ.get("SILENTBLUE_OSV_URL", "").strip()
+    raw = configured or _DEFAULT_OSV_URL
+    source = (
+        "SILENTBLUE_OSV_URL"
+        if configured
+        else "default. Set SILENTBLUE_OSV_URL in .env to change this endpoint."
+    )
+    parsed = urllib.parse.urlsplit(raw)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host:
+        return (
+            "",
+            "",
+            source,
+            "SILENTBLUE_OSV_URL must be an https URL. "
+            f"The public endpoint is {_DEFAULT_OSV_URL}.",
+        )
+    return raw, host, source, ""
 
 
 _CRITICAL = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
@@ -955,9 +1080,12 @@ def _purl(package: _Package) -> str:
 
 
 def _default_fetch(payload: dict, context: ssl.SSLContext) -> dict:
+    url, host, _source, note = osv_endpoint()
+    if not url:
+        raise OSError(note or "OSV URL is missing")
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
-        _OSV_URL,
+        url,
         data=body,
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
@@ -969,7 +1097,7 @@ def _default_fetch(payload: dict, context: ssl.SSLContext) -> dict:
     try:
         with opener.open(request, timeout=_TIMEOUT_S) as response:
             final = urllib.parse.urlsplit(response.geturl())
-            if (final.hostname or "").lower() != _OSV_HOST:
+            if (final.hostname or "").lower() != host:
                 raise OSError("redirect to another host")
             raw = response.read(_MAX_BODY + 1)
     except urllib.error.HTTPError as exc:
@@ -983,15 +1111,7 @@ def _default_fetch(payload: dict, context: ssl.SSLContext) -> dict:
 
 
 def _ssl_context(repo: Path) -> ssl.SSLContext | None:
-    ready, _note = load_ca(repo)
-    if not ready:
-        return None
-    override = os.environ.get("SILENTBLUE_CA_BUNDLE", "").strip()
-    if override:
-        return ssl.create_default_context(cafile=str(Path(override).expanduser()))
-    context = ssl.create_default_context()
-    if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
-        return None
+    context, _note = ca_context(repo)
     return context
 
 

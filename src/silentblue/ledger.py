@@ -23,6 +23,7 @@ class _Call:
     input_tokens: int | None
     output_tokens: int | None
     thinking_tokens: int | None
+    failure: str = ""
 
 
 class SessionLedger:
@@ -33,7 +34,7 @@ class SessionLedger:
         self._noted: set[str] = set()
         self._lock = threading.Lock()
 
-    def add(self, work: str, reply: object, provider: str, model: str) -> None:
+    def add(self, work: str, reply: object, provider: str, model: str, failure: str = "") -> None:
         """Record one completion. A reply without usage stays unknown."""
 
         if isinstance(reply, ModelReply):
@@ -44,9 +45,10 @@ class SessionLedger:
                 reply.input_tokens,
                 reply.output_tokens,
                 reply.thinking_tokens,
+                failure,
             )
         else:
-            item = _Call(work, provider or "unknown", model or "unknown", None, None, None)
+            item = _Call(work, provider or "unknown", model or "unknown", None, None, None, failure)
         with self._lock:
             self._calls.append(item)
             self._noted.add(work)
@@ -72,7 +74,7 @@ class SessionLedger:
         lines = [
             f"Total USD: {total_usd}",
             f"Model calls: {total_calls}",
-            _NOTE,
+            *_cost_notes(calls),
             "",
             "Work",
         ]
@@ -114,6 +116,71 @@ class SessionLedger:
         if not emitted:
             lines.append("None.")
         return lines
+
+    def activity(self) -> str:
+        """Say whether this session has called the model."""
+
+        with self._lock:
+            calls = list(self._calls)
+        if not calls:
+            return "This session has not called the model."
+        answered = sum(
+            1
+            for call in calls
+            if call.input_tokens is not None and call.output_tokens is not None
+        )
+        failures = [call.failure for call in calls if call.failure]
+        parts: list[str] = []
+        if answered:
+            parts.append(f"{_counted(answered)} returned tokens")
+        if failures:
+            parts.append(f"{_counted(len(failures))} failed: {_unique(failures)}")
+        if not parts:
+            return "This session called the model and received no token counts."
+        return "This session: " + "; ".join(parts) + "."
+
+
+def _cost_notes(calls: list[_Call]) -> list[str]:
+    notes = [_NOTE]
+    unpriced: list[str] = []
+    thinking_missing = False
+    for call in calls:
+        if call.input_tokens is None or call.output_tokens is None:
+            continue
+        if call.thinking_tokens is None:
+            thinking_missing = True
+        label = f"{call.provider} {call.model}"
+        _spent, known = actual_cost(
+            call.input_tokens,
+            call.output_tokens,
+            provider=call.provider,
+            model_name=call.model,
+            usage_known=True,
+            made_calls=True,
+        )
+        if not known and label not in unpriced:
+            unpriced.append(label)
+    for label in unpriced:
+        notes.append(
+            f"USD is unknown for {label}. Set SILENTBLUE_PRICE_INPUT_PER_MILLION and "
+            "SILENTBLUE_PRICE_OUTPUT_PER_MILLION in .env, then quit and start the session again."
+        )
+    if thinking_missing:
+        notes.append("Thinking is unknown. This model sent no reasoning count.")
+    return notes
+
+
+def _counted(count: int) -> str:
+    noun = "call" if count == 1 else "calls"
+    return f"{count} {noun}"
+
+
+def _unique(reasons: list[str]) -> str:
+    ordered: list[str] = []
+    for reason in reasons:
+        if reason not in ordered:
+            ordered.append(reason)
+    return ", ".join(ordered)
 
 
 def _model_keys(calls: list[_Call]) -> list[tuple[str, str]]:

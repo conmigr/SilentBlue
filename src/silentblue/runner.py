@@ -16,7 +16,7 @@ from silentblue.cost import actual_cost, estimate_spend, format_usd
 from silentblue.envfile import load_operator_env
 from silentblue.errors import SilentBlueError, UsageError
 from silentblue.assess import prepare_graph
-from silentblue.model import HttpModelClient, ModelClient, resolve_model
+from silentblue.model import HttpModelClient, ModelClient, configured_model
 from silentblue.models import (
     ANALYSIS_STAGES,
     ASSESS_STAGES,
@@ -161,13 +161,15 @@ def run_scan(
             message = f"{message}; scan stopped"
         if degraded and state.advisories == "degraded":
             exit_code = 1
-            message = f"{message}; assessment degraded; advisory check did not complete"
+            message = f"{message}; assessment degraded; {_advisory_failure(state.advisory_note)}"
         elif state.advisories == "degraded":
             exit_code = 1
-            message = f"{message}; advisory check did not complete"
+            message = f"{message}; {_advisory_failure(state.advisory_note)}"
         elif degraded:
             exit_code = 1
             message = f"{message}; assessment degraded"
+        if config.profile == "assess":
+            message = f"{message}; {_assess_outcome(report, ctx)}"
         if kept_note:
             message = f"{message}; {kept_note}"
     except SilentBlueError as exc:
@@ -410,6 +412,13 @@ def _apply_budget_env(config: AppConfig) -> AppConfig:
     return updated
 
 
+def _advisory_failure(note: str) -> str:
+    detail = note.strip() or "The advisory check did not complete."
+    if detail.startswith("The advisory check"):
+        return detail
+    return f"The advisory check did not complete. {detail}"
+
+
 def _previous_report(root: Path, dirname: str) -> FinalReport | None:
     """Load the report a new opening scan may keep advisory rows from."""
 
@@ -427,19 +436,48 @@ def _prepare_model(config: AppConfig) -> AppConfig:
 
     if config.profile != "assess":
         return config
-    model = config.model
-    updates: dict[str, str] = {}
-    if os.environ.get("SILENTBLUE_PROVIDER"):
-        updates["provider"] = os.environ["SILENTBLUE_PROVIDER"]
-    if not model.api_key and os.environ.get("SILENTBLUE_API_KEY"):
-        updates["api_key"] = os.environ["SILENTBLUE_API_KEY"]
-    if os.environ.get("SILENTBLUE_BASE_URL"):
-        updates["base_url"] = os.environ["SILENTBLUE_BASE_URL"]
-    if os.environ.get("SILENTBLUE_MODEL"):
-        updates["name"] = os.environ["SILENTBLUE_MODEL"]
-    if updates:
-        model = model.model_copy(update=updates)
-    return config.model_copy(update={"model": resolve_model(model)})
+    return config.model_copy(update={"model": configured_model(config.model)})
+
+
+def _assess_outcome(report: FinalReport, ctx: StageContext) -> str:
+    """Say whether the model ran and why new gaps were kept or dropped."""
+
+    added = sum(1 for finding in report.findings if finding.origin == "assessment")
+    counts: dict[str, int] = {}
+    for item in report.dropped:
+        counts[item.reason] = counts.get(item.reason, 0) + 1
+    dropped = ", ".join(f"{reason} {counts[reason]}" for reason in sorted(counts))
+    failed = list(ctx.call_failures)
+    made = ctx.model_calls - ctx.resumed_calls
+    if made == 0 and not failed:
+        head = "The model was not called"
+    elif ctx.answered_calls == 0 and failed:
+        head = f"{_counted(len(failed))} failed: {_unique(failed)}"
+    elif ctx.answered_calls == 0:
+        head = "The model ran and returned no token counts"
+    else:
+        head = f"{_counted(ctx.answered_calls)} returned tokens"
+        if failed:
+            head = f"{head}; {_counted(len(failed))} failed: {_unique(failed)}"
+    sentence = f"{head}; assessment gaps added: {added}"
+    if dropped:
+        sentence = f"{sentence}; dropped: {dropped}"
+    if ctx.budget_exhausted:
+        sentence = f"{sentence}; the call budget stopped further calls"
+    return sentence
+
+
+def _counted(count: int) -> str:
+    noun = "call" if count == 1 else "calls"
+    return f"{count} {noun}"
+
+
+def _unique(reasons: list[str]) -> str:
+    ordered: list[str] = []
+    for reason in reasons:
+        if reason not in ordered:
+            ordered.append(reason)
+    return ", ".join(ordered)
 
 
 def _attach_cost(state: RunState, config: AppConfig) -> RunState:

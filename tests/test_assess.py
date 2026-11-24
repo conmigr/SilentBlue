@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from silentblue.errors import UsageError
+from silentblue.assess import _GapList, _validate
+from silentblue.errors import RunError, UsageError
 from silentblue.graph import build_graph
 from silentblue.model import HttpModelClient
 from silentblue.models import ModelConfig, ScopedFile, ScopeResult
@@ -140,6 +141,48 @@ def test_bad_line_is_dropped(workspace):
     assert any(item["reason"] == "line_out_of_range" for item in report["dropped"])
 
 
+def test_a_fenced_gap_uses_a_path_and_a_string_line():
+    text = """The control is missing.
+```json
+{"findings": [{"family": "injection", "playbook": "injection", "title": "SQL", "path": "app.py", "line": "2", "detail": "concat",}]}
+```
+"""
+    parsed = _validate(text, _GapList)
+    assert parsed is not None
+    assert parsed.gaps[0].file == "app.py"
+    assert parsed.gaps[0].line == 2
+    assert parsed.gaps[0].control_family == "injection"
+    assert parsed.gaps[0].description == "concat"
+
+
+def test_prose_before_the_object_does_not_hide_the_json():
+    text = 'The sample uses {name} in the query.\n{"gaps": []}'
+    parsed = _validate(text, _GapList)
+    assert parsed is not None
+    assert parsed.gaps == []
+
+
+def test_an_empty_model_reply_is_not_labeled_unparseable(workspace):
+    class Empty:
+        def complete(self, system: str, user: str) -> str:
+            if "Source excerpts" in user:
+                raise RunError("model reply was empty")
+            return json.dumps({"objectives": []})
+
+    (workspace["repo"] / "app.py").write_text("value = 1\n", encoding="utf-8")
+    result = run_scan(
+        repo=workspace["repo"],
+        state_dir=workspace["state"],
+        manifest_dir=workspace["manifests"],
+        profile="assess",
+        client=Empty(),
+    )
+    report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
+    assert result.exit_code == 1
+    assert any(item["reason"] == "empty reply" for item in report["dropped"])
+    assert not any(item["reason"] == "unparseable" for item in report["dropped"])
+
+
 def test_invalid_json_is_dropped_and_degrades(workspace):
     result, _client = _scan(
         workspace,
@@ -181,6 +224,8 @@ def test_empty_objectives_still_reads_source(workspace):
     assert report["findings"] == []
     assert report["hollow"] is False
     assert report["metrics"]["model_calls"] == 2
+    assert "assessment gaps added: 0" in result.message
+    assert "dropped: empty 1" in result.message
     assert "untrusted" not in report["summary"]
     assert any("1|value = 1" in prompt for prompt in client.prompts)
 
