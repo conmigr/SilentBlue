@@ -12,7 +12,8 @@ Run every command from this directory. `python -m silentblue` is the command to 
 
 ## Requirements
 
-- Python 3.11 or newer
+- Windows, macOS, or Linux
+- Python 3.11 or newer. The command is `python -m silentblue`. Use `python3 -m silentblue` when `python` is not installed. Those two names matter only when they are different programs.
 
 
 
@@ -27,7 +28,7 @@ python -m silentblue estimate --repo examples/sample
 python -m silentblue scan --repo examples/sample
 ```
 
-On macOS the same commands run in Terminal:
+On macOS and Linux the same commands run in the terminal:
 
 ```bash
 python -m pip install -e ".[dev]"
@@ -56,10 +57,16 @@ This is the session half of [How to run](#how-to-run). A new repository and a re
 
 Prepare once from this directory, using the install and `setup` commands in [Run a detect scan](#run-a-detect-scan). Set the API key in [Use a model](#use-a-model) before the assessment. Detect, `/model draft`, `/model assume`, and `/model accept` make no model call and do not need the key.
 
-Open the prompt. Replace the path with a real directory you maintain.
+Open the prompt. Replace the path with a real directory you maintain. On Windows:
 
 ```powershell
 python -m silentblue run --repo C:\path\to\repo
+```
+
+On macOS and Linux:
+
+```bash
+python -m silentblue run --repo /path/to/repo
 ```
 
 The session runs a detect scan first. Stage lines look like `d0  completed`. An assess stage also prints `d4  running` while it waits. The scan replaces `<repo>/security-scan/findings.json` and writes Markdown, SARIF, HTML, and PDF beside it. Source stays unchanged. The prompt is `silentblue>` on the same line as your typing. On a terminal, the prompt, labels, stage ids, finding numbers, and slash commands use one blue. The rest stays the terminal default. Set `NO_COLOR` to turn the blue off.
@@ -138,17 +145,17 @@ The accepted draft does not gain the advisory assets from this scan. Follow [New
 
 Pin, install-verification, and CA-bundle checks run on every detect scan, including the scan that opens the session. They read the tree and send nothing.
 
-OSV is off until you name it. Type `/scan osv`. The session prints the OSV URL, where that URL came from, the resolved package count, and the CA bundle result, then waits for `yes` or `no`. `CA bundle: missing` is followed by the reason. A missing system store names the Python that cannot see certificates. On a Mac, run `Install Certificates.command` for that same Python, quit the session, and start it again. If `certifi` is installed for that Python and its file sits outside the repository, Silent Blue uses that file. On Windows, install Python from python.org and install the Windows root certificate updates. Leave `SILENTBLUE_CA_BUNDLE` unset after that. `no` leaves the last report as it was. `/scan assess osv` prints the cost estimate and that same preview, then waits once. `/scan assess` without `osv` stays offline.
+OSV is off until you name it. Type `/scan osv`. The session prints the OSV URL, where that URL came from, the resolved package count, and the CA bundle result, then waits for `yes` or `no`. `CA bundle: missing` is followed by the reason. A missing system store names the Python that cannot see certificates. On a Mac, run `Install Certificates.command` for that same Python, quit the session, and start it again. On Windows, install Python from python.org and install the Windows root certificate updates. On Linux, install the operating-system CA certificates for that Python. If `certifi` is installed for that same Python and its file sits outside the repository, Silent Blue uses that file. Leave `SILENTBLUE_CA_BUNDLE` unset after that. `no` leaves the last report as it was. `/scan assess osv` prints the cost estimate and that same preview, then waits once. `/scan assess` without `osv` stays offline.
 
 `/scan` and the scan that `run` starts stay offline. The scan that opens `run` keeps the OSV rows when the resolved packages match the last query, and the scan message says they were kept. That scan does not send a new query. When the packages changed, or the last query did not record the package set, the rows stay out and the message tells you to type `/scan osv`. A later `/scan` or `/scan assess` replaces `findings.json` and drops advisory rows unless that command also says `osv`. `/scan resume` finishes assess units already started. It does not send another query and it does not keep advisory rows. Run `/scan osv` again after it when you want them.
 
-`/finding 1` prints the same labels as the Markdown finding, including the CVSS score, version, and vector. A package advisory also prints the component, package URL, and fixed version. `/status` adds `advisories: off`, `advisories: queried`, or `advisories: degraded`. `show osv findings` lists only the `dependency-vulnerable` rows. `/findings osv` is the same command. The number on each row is its number in the full report, so `/finding 12` still opens that gap.
+`/finding 1` prints the same labels as the Markdown finding, including the CVSS score, version, and vector. A package advisory also prints the component, package URL, and fixed version. `/status` adds `advisories: off`, `advisories: queried`, or `advisories: degraded`. `show osv findings` lists only the `dependency-vulnerable` rows. `/findings osv` is the same command. The number on each row is its number in the full report, so `/finding 12` still opens that gap. `show findings count by control category` prints how many gaps sit in each control category, split by severity. `show findings by control category` lists those gaps under the category names. `show supply chain findings` lists only that category, and the same sentence works for the others. `/findings counts` is the count matrix.
 
 The order that cites those rows in the threat model is [New repository](#new-repository): `/scan osv`, then `/model draft assess`, then `/model accept`, then `/scan assess osv`.
 
 ### Assessment
 
-Run this after `/model accept`, so the review reads named files first and then files that already have a gap. The comprehensive command is `/scan assess osv`.
+Run this after `/model accept`. The review writes its file list before the first model call: files named by the accepted threat model, source files changed since that model was committed, untracked source, then in-repo imports of those files. If the threat model was never committed, or git cannot be read, the list is the source tree and the report says so. The comprehensive command is `/scan assess osv`.
 
 1. Type `/scan assess osv`. The session prints `estimated_cost_usd` and the OSV preview, then asks `Continue? yes/no` once.
 2. Type `yes` to run the assess profile and query OSV. Type `no` to keep the current report. `no` makes no model call and sends no query.
@@ -156,13 +163,13 @@ Run this after `/model accept`, so the review reads named files first and then f
 
 `/scan assess` without `osv` runs the same review and drops the advisory rows. Use it when this report should stay offline.
 
-A large tree stays one scan and one `findings.json`. The estimate also prints `workers`, `estimated_units`, `source_files`, and `files_in_budget`. After `yes`, the prompt returns and the review runs in the background. Type `/status` for the stage, units finished, and model calls. Type `/findings` for the last finished report. Type `/quit` to stop after the units already started, then `/scan resume` later to continue. Resume finishes units already started. It does not send another OSV query, and the report it writes has no advisory rows. Run `/scan osv` again after it when you want them. The default budget is 20 units and 40 calls. For a larger tree set `SILENTBLUE_MAX_UNITS`, `SILENTBLUE_MAX_CALLS`, and optionally `SILENTBLUE_MAX_COST_USD` and `SILENTBLUE_WORKERS` before you start. The finished report repeats how many source files the model read.
+A large tree stays one scan and one `findings.json`. The estimate also prints `workers`, `estimated_units`, `source_files`, and `files_in_budget`. That estimate assumes the source tree and one model call per unit. After `yes`, the prompt returns and the review runs in the background. Type `/status` for the stage, units finished, and model calls. Type `/findings` for the last finished report. Type `/quit` to stop after the units already started, then `/scan resume` later to continue the same file list. Resume finishes units already started. It does not send another OSV query, and the report it writes has no advisory rows. Run `/scan osv` again after it when you want them. `SILENTBLUE_MAX_CALLS` can stop the review before every list path is read. The summary then says `Model review incomplete` and how many list paths were read. It also states how many gaps came from detectors and how many came from OSV. A cited file and line becomes a finding on the first reply. That finding stays open until a later reply cites the line that shows the control in place. Replies are saved under the state directory, outside the repository.
 
 ### Leave and follow up
 
 1. Type `/report` for `findings.json` and the latest Markdown, HTML, PDF, and SARIF files. A YAML report is listed when the scan wrote one. Type `/help` any time for the command list.
 2. Type `/quit`.
-3. From this directory, with the same repository path:
+3. From this directory, with the same repository path. On macOS and Linux, use `/path/to/repo`.
 
 ```powershell
 python -m silentblue remediate --repo C:\path\to\repo
@@ -175,7 +182,7 @@ Accept the threat model from the prompt. A later one-shot `scan` or `scan --prof
 
 ## How to run
 
-Every path below starts in this directory. Replace the sample paths with directories you maintain. The command line runs one command and exits. The session stays open at `silentblue>` until `/quit`. An agent uses that same prompt, with a slash command or a sentence, or the Python calls in [From code](#from-code).
+Every path below starts in this directory. The command is `python -m silentblue` on Windows, macOS, and Linux. Windows paths look like `C:\path\to\repo`. macOS and Linux paths look like `/path/to/repo`. Set an environment value in PowerShell with `$env:NAME = "value"`, and in a Mac or Linux terminal with `export NAME=value`. `~/.silentblue` is the home directory on each system. On Windows that is the user profile, and Python accepts the `~` spelling. Replace the sample paths with directories you maintain. The command line runs one command and exits. The session stays open at `silentblue>` until `/quit`. An agent uses that same prompt, with a slash command or a sentence, or the Python calls in [From code](#from-code).
 
 Detect and assess send no traffic unless the scan is run with `--osv` or `/scan osv`. That query is one batch request to `SILENTBLUE_OSV_URL`, and in the session it waits until you confirm. A pinned set larger than 1000 packages is split into further requests to the same host. `deploy` sends one GET to the URL you name, and only after you confirm.
 
@@ -193,9 +200,11 @@ python -m silentblue remediate --repo C:\path\to\repo
 python -m silentblue validate --repo C:\path\to\repo
 ```
 
-`estimate` and the detect `scan` make no model call. `--osv` sends one batch request to `SILENTBLUE_OSV_URL` and makes no model call. `--profile assess` prints nothing and spends the model budget immediately, so run `estimate --profile assess` first when you want the cost before that scan. After the threat model is accepted in a session, the comprehensive one-shot is `scan --repo C:\path\to\repo --profile assess --osv`. `scan --profile assess` without `--osv` replaces the report and drops advisory rows. `remediate` and `validate` need the API key. `deploy` does not.
+On macOS and Linux, use `/path/to/repo` in each of those commands.
 
-Session. This is the diagram above.
+`estimate` and the detect `scan` make no model call. `--osv` sends one batch request to `SILENTBLUE_OSV_URL` and makes no model call. `--profile assess` prints nothing and spends the model budget immediately, so run `estimate --profile assess` first when you want the cost before that scan. After the threat model is accepted in a session, the comprehensive one-shot is `scan --repo C:\path\to\repo --profile assess --osv` on Windows, and the same command with `/path/to/repo` on macOS and Linux. `scan --profile assess` without `--osv` replaces the report and drops advisory rows. `remediate` and `validate` need the API key. `deploy` does not.
+
+Session. This is the diagram above. On macOS and Linux, use `/path/to/repo`.
 
 ```powershell
 python -m silentblue run --repo C:\path\to\repo
@@ -213,7 +222,7 @@ python -m silentblue run --repo C:\path\to\repo
 
 A frontend, a backend, and a component library are three reviews. Each keeps its own `security-scan/findings.json` and its own threat model. Finish them in that order. Run deploy once, on the repository that holds the edge (proxy, load balancer, ingress, or Terraform), after the other reports exist.
 
-Command line. Run the comprehensive scan for each path after that path's threat model is accepted. The list below is the order, not one shell loop.
+Command line. Run the comprehensive scan for each path after that path's threat model is accepted. The list below is the order, not one shell loop. On macOS and Linux, use `/src/web`, `/src/api`, `/src/ui`, and `/src/infra`.
 
 ```powershell
 python -m silentblue scan --repo C:\src\web --profile assess --osv
@@ -230,7 +239,7 @@ python -m silentblue batch --list examples/repos.txt
 
 `examples/repos.txt` is one path per line. Blank lines and lines that start with `#` are skipped.
 
-Session. Open one prompt per repository. `/quit` before the next path.
+Session. Open one prompt per repository. `/quit` before the next path. On macOS and Linux, use `/src/web`.
 
 ```powershell
 python -m silentblue run --repo C:\src\web
@@ -245,6 +254,13 @@ $env:SILENTBLUE_DEPLOY_URL = "https://app.example"
 python -m silentblue run --repo C:\src\web
 ```
 
+On macOS and Linux:
+
+```bash
+export SILENTBLUE_DEPLOY_URL=https://app.example
+python -m silentblue run --repo /src/web
+```
+
 Type `/deploy`, then `yes`. The session reads files inside `C:\src\web`. When the edge files are only in `C:\src\infra`, run this from the command line instead of a fourth prompt:
 
 ```powershell
@@ -253,7 +269,7 @@ python -m silentblue deploy --repo C:\src\web --url https://app.example --deploy
 
 The edge threat model is the frontend model. It should name the public listener, the origin, and the data store. After `/deploy`, type `/model draft` if those deployment gaps should become assets, then `/model accept` and `/scan`.
 
-On macOS the same commands run in Terminal. Set the URL with `export SILENTBLUE_DEPLOY_URL=https://app.example` before `run`.
+On macOS and Linux the same commands run in the terminal, with `/src/web` and `/src/infra` in place of the Windows paths.
 
 A later prompt could read a workspace file kept outside those trees. This version does not read that file. The roles are the order you already run by hand:
 
@@ -268,6 +284,8 @@ A later prompt could read a workspace file kept outside those trees. This versio
 }
 ```
 
+These path strings are examples. A Windows path in that file uses forward slashes, as in `C:/src/web`. A Mac or Linux path uses `/src/web`.
+
 
 
 ### Deploy
@@ -281,6 +299,8 @@ Command line:
 ```powershell
 python -m silentblue deploy --repo C:\path\to\repo --url https://app.example --snapshot C:\secrets\account.json --deploy-dir C:\src\infra
 ```
+
+On macOS and Linux, use `/path/to/repo`, `/path/to/account.json`, and `/src/infra`.
 
 Leave off `--url` when you only want the file review. Leave off `--snapshot` when you have no account file. Leave off `--deploy-dir` when the edge files are already in the repository.
 
@@ -298,6 +318,8 @@ url  https://app.example
 account  C:\secrets\account.json
 Continue? yes/no
 ```
+
+On macOS and Linux the account line is `account  /path/to/account.json`.
 
 `yes` runs the review. `no` leaves the report unchanged. `url  not set` means no request is made. `account  not observed` means the snapshot was not set. An external `--deploy-dir` is command-line only. The session reviews the repository you opened.
 
@@ -326,6 +348,7 @@ After deploy, type `/model draft` when the edge should join the threat model, th
 from silentblue.sdk import deploy, scan
 
 scan(r"C:\src\web")
+scan("/src/web")
 scan(r"C:\src\web", osv=True)
 scan(r"C:\src\web", profile="assess")
 scan(r"C:\src\api", profile="assess")
@@ -338,6 +361,8 @@ deploy(
 )
 ```
 
+On macOS and Linux the same calls use `"/src/web"`, `"/src/api"`, `"/src/ui"`, `"/path/to/account.json"`, and `"/src/infra"`.
+
 `scan` uses detect until `profile="assess"`. `osv=True` queries OSV for that call. `deploy` makes no model call.
 
 ## Use a model
@@ -346,6 +371,12 @@ Detect, ingest, batch, and deploy do not need a key. Assess, remediate, and vali
 
 ```powershell
 Copy-Item .env.example .env
+```
+
+On macOS and Linux:
+
+```bash
+cp .env.example .env
 ```
 
 Edit `.env` in this directory and set `SILENTBLUE_API_KEY` to a key for the provider you want. `SILENTBLUE_PROVIDER` is `openai`, `anthropic`, `grok`, or `gemini`. `gpt`, `claude`, `xai`, and `google` are aliases. Leave `SILENTBLUE_BASE_URL` and `SILENTBLUE_MODEL` commented to use that provider's default endpoint and model. The defaults are listed in `.env.example`.
@@ -363,7 +394,7 @@ python -m silentblue validate --repo examples/sample
 
 `remediate` writes `examples/sample/security-remediation/<case_id>.json` and does not change source. Add `--fix` only when you want an accepted patch applied. Without a key, these three commands exit 2 and write no report.
 
-Put the env file at `~/.silentblue/.env` instead when you scan this Silent Blue checkout. A `.env` inside the repository being scanned is ignored.
+Put the env file at `~/.silentblue/.env` instead when you scan this Silent Blue checkout. That path is the home directory on Windows, macOS, and Linux. On Windows it is the user profile, and Python accepts the `~` spelling. A `.env` inside the repository being scanned is ignored.
 
 ## More commands
 
@@ -385,7 +416,7 @@ Artifacts land in `<repo>/security-scan/`:
 - `<repo>_<timestamp>_report.sarif` — SARIF 2.1.0 for code-scanning tools
 - `<repo>_<timestamp>_report.yaml` — the same fields as `findings.json`. Written only when `--format` includes `yaml`
 
-A run manifest is written to the working directory, or to `--manifest-dir`. Checkpoints live under the state directory (`SILENTBLUE_STATE_DIR`, or `~/.silentblue/state`), which must sit outside the repository.
+A run manifest is written to the working directory, or to `--manifest-dir`. Checkpoints live under the state directory (`SILENTBLUE_STATE_DIR`, or `~/.silentblue/state`), which must sit outside the repository. That state path is the home directory on Windows, macOS, and Linux.
 
 ## Pipeline
 
@@ -394,13 +425,13 @@ A run manifest is written to the working directory, or to `--manifest-dir`. Chec
 | ---------------- | --------------------------------------------------------------------- | -------------------- |
 | D0 Scope         | Walks the repository and drops anything that resolves outside it      | No                   |
 | D1 Context       | Records languages, manifests, and control-related paths               | No                   |
-| D2 Control model | Names the controls to review. Skipped by detect                       | Assess only          |
-| D3 Units         | Builds file sets from named controls, then walks the remaining source | No                   |
-| D4 Assessment    | Reads each unit against its playbooks                                 | Assess only          |
-| D5 Bind          | Checks cited lines, exact pins, install verification, and CA bundle paths. OSV runs after this stage only when the scan asks for it | No                   |
-| D6 Review        | Confirms, rejects, or marks each model gap inconclusive               | Assess only          |
-| D7 Dedup         | Collapses nearby hits of the same rule                                | No                   |
-| D8 Prioritize    | Orders gaps and mints `sb1_` case ids                                 | No                   |
+| D2 File list     | Writes the model file list and carries open model findings. Skipped by detect | No                   |
+| D3 Units         | Cuts that list into units                                             | No                   |
+| D4 Assessment    | Reads each unit. A cited line becomes a finding                       | Assess only          |
+| D5 Bind          | Keeps model findings whose lines still exist, then adds detector rows. OSV runs after this stage only when the scan asks for it | No                   |
+| D6 Review        | Leaves model findings in place                                        | No                   |
+| D7 Dedup         | Collapses nearby detector hits and leaves model findings intact       | No                   |
+| D8 Prioritize    | Orders gaps and keeps a model case id already minted                  | No                   |
 | D9 Report        | Writes JSON, Markdown, SARIF, HTML, and PDF from one object. YAML when `--format` includes it | No                   |
 | D10 Remediate    | Writes one case file per confirmed gap. Report-only unless `--fix`    | One call per gap     |
 | D11 Validate     | Three reviewers read a temporary copy. The host records the verdict   | Three calls per case |
@@ -455,7 +486,7 @@ Scope defaults skip VCS metadata, virtual environments, `node_modules`, build ou
 
 Each finding names a control family, a rule, a file and line, a case id, and a remediation note. Case ids look like `sb1_` plus 32 hexadecimal characters. They join `findings.json`, the Markdown report, the SARIF `partialFingerprints["sbFindingId/v1"]` field, and `security-remediation/<case_id>.json`. `findings.json` is schema `1.1`. Every finding has a report `number`, a CVSS v3.1 score, and a CVSS vector. A source finding's vector is the one named for its rule, in the same band as its severity. An OSV finding keeps the score and vector from the advisory, plus `advisory_id` and the package `component`. A source finding's component is the file. Severity remains the Silent Blue rank used to order the report.
 
-In Markdown, HTML, PDF, and `/finding`, the number is the heading `Finding <number>: <title>`. The facts are `Label:` lines. `File:` and `Line:` are separate. `CVSS score:`, `CVSS version:`, and `CVSS vector:` are three lines. `Description:`, `Evidence:`, and `Remediation:` follow. `Playbook:` is printed only when a playbook is set. A package advisory adds `Component:`, `Package URL:`, and `Fixed:` when a fixed version is known. A source finding does not repeat the file on a component line. The YAML file uses the `findings.json` field names rather than these labels.
+In Markdown, HTML, PDF, and `/finding`, the number is the heading `Finding <number>: <title>`. The facts are `Label:` lines. `File:` and `Line:` are separate. `CVSS score:`, `CVSS version:`, and `CVSS vector:` are three lines. Detector findings use `Description:` and `Remediation:`. A model finding uses `Impact:` and `Recommendation:`, and `Category:` when the model named one. `Playbook:` is printed only when a playbook is set. A package advisory adds `Component:`, `Package URL:`, and `Fixed:` when a fixed version is known. A source finding does not repeat the file on a component line. The YAML file uses the `findings.json` field names rather than these labels.
 
 Findings are candidates. The deterministic pass covers Python, JavaScript, TypeScript, Ruby, C, C++, Rust, Go, Java, PHP, C#, and shell. The checks look for secrets and default passwords, SQL and document-query construction, directory filters, shell execution, dynamic code execution, templates compiled from strings, headers and markup taken from request data, outbound URLs, file paths, and redirect targets taken from the request, unsafe object decoders, weak password hashes and token generators, unauthenticated ciphers, JWT verification turned off, cookie flags turned off, CSRF checks turned off, request bodies copied into models, request limits turned off, debug flags, host and browser controls turned off, logging turned off, dependencies that are not an exact pin, cleartext dependencies, installs that turn verification off, a relative CA bundle that is not in the repository, downloads piped into a shell, and wide workflow permissions. Tokens in web storage, credentials in logs, certificate checks, and open cross-origin settings remain in the same pass. PyPI and npm declarations are the pin check. A lockfile in the same directory (`package-lock.json`, `poetry.lock`, or `Pipfile.lock`) that names the package suppresses the pin finding.
 

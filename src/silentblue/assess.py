@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from silentblue.errors import UsageError
 from silentblue.graph import build_graph
 from silentblue.models import (
-    ControlObjective,
+    CASE_ID,
     DroppedFinding,
     Finding,
     RunState,
@@ -20,9 +20,10 @@ from silentblue.models import (
     WorkUnit,
 )
 from silentblue.paths import is_reparse_point, is_within
-from silentblue.scope import is_source_path
-from silentblue.threat import priority_bands
 from silentblue.playbooks import PLAYBOOKS, Playbook, playbook_for
+from silentblue.rank import case_id_for
+from silentblue.reviewlist import build_review_list, save_reply, save_review_list
+from silentblue.scope import is_source_path
 from silentblue.redact import redact
 from silentblue.runtime import StageContext
 
@@ -106,93 +107,43 @@ def prepare_graph(ctx: StageContext, state: RunState) -> None:
 
 
 def run_d2(state: RunState, ctx: StageContext) -> RunState:
-    """Ask which controls this repository needs."""
-
-    if state.scope is None or state.context is None:
-        raise UsageError("context is missing")
-    paths = [item.path for item in state.scope.files[:200]]
-    sample = _excerpts(Path(state.repo), _ranked_source(paths)[:3], 1500)
-    user = (
-        f"Primary language: {state.context.primary_language}\n"
-        f"Manifests: {', '.join(state.context.manifests) or 'none'}\n"
-        f"Control-related paths: {', '.join(state.context.control_hints) or 'none'}\n"
-        f"Allowed control families: {_FAMILIES}\n"
-        "Files:\n"
-        + "\n".join(paths)
-        + "\n\nSource sample:\n"
-        + (sample or "(no source excerpt)")
-        + "\n\nReturn JSON "
-        '{"objectives": [{"control_family", "title", "rationale", "paths"}]}. '
-        "paths must be chosen from the file list. "
-        "Name a control for every family this source needs. "
-        "Return an empty objectives array only when the list has no source files."
-    )
-    parsed = _ask(ctx, user, _ObjectiveList)
-    objectives: list[ControlObjective] = []
-    if parsed is not None:
-        known = {item.path for item in state.scope.files}
-        for item in parsed.objectives:
-            if item.control_family not in PLAYBOOKS or not item.title.strip():
-                continue
-            selected = [path.replace("\\", "/") for path in item.paths if path.replace("\\", "/") in known]
-            objectives.append(
-                ControlObjective(
-                    control_family=item.control_family,
-                    title=item.title.strip()[:200],
-                    rationale=redact(item.rationale.strip())[:400],
-                    paths=selected[: ctx.config.budgets.max_files_per_unit],
-                )
-            )
-    return ctx.stamp(state.model_copy(update={"objectives": objectives}))
-
-
-def run_d3(state: RunState, ctx: StageContext) -> RunState:
-    """Turn objectives into work units. No model call."""
+    """Write the model file list before any model call, and carry open model findings."""
 
     if state.scope is None:
         raise UsageError("scope is missing")
-    files = [item.path for item in state.scope.files]
-    known = set(files)
-    units: list[WorkUnit] = []
-    state_dir = getattr(ctx, "state_dir", None) or (Path.home() / ".silentblue" / "state")
-    bands = priority_bands(Path(state.repo), state_dir, state.scope)
-    cap = ctx.config.budgets.max_files_per_unit
-    if bands:
-        ordered = sorted(bands, key=lambda path: (bands[path], path))
-        units.extend(_preferred_units(ordered, known, ctx.config.budgets.max_units, cap))
-    for index, objective in enumerate(state.objectives, start=1):
-        if len(units) >= ctx.config.budgets.max_units:
-            break
-        chosen = _resolve_paths(objective.paths, known, files, cap)
-        if not chosen:
-            continue
-        units.append(
-            WorkUnit(
-                unit_id=f"u{index}",
-                control_family=objective.control_family,
-                title=objective.title,
-                rationale=objective.rationale,
-                paths=chosen,
-            )
+    repo = Path(state.repo)
+    state_dir = _state_dir(ctx)
+    paths, note = build_review_list(repo, state.scope, state_dir)
+    save_review_list(state_dir, repo, state.run_id, paths, note)
+    carried = _carried_findings(repo, ctx.config.output.dirname)
+    return ctx.stamp(
+        state.model_copy(
+            update={"objectives": [], "review_paths": paths, "review_note": note, "findings": carried}
         )
-    covered = {path for unit in units for path in unit.paths}
-    room = ctx.config.budgets.max_units - len(units)
-    per_unit = ctx.config.budgets.max_files_per_unit
-    for walk_index, chunk in enumerate(_source_chunks(files, covered, room, per_unit), start=1):
+    )
+
+
+def run_d3(state: RunState, ctx: StageContext) -> RunState:
+    """Cut the saved file list into units. No model call and no unit cap."""
+
+    cap = max(1, ctx.config.budgets.max_files_per_unit)
+    units: list[WorkUnit] = []
+    paths = list(state.review_paths)
+    for index, start in enumerate(range(0, len(paths), cap), start=1):
         units.append(
             WorkUnit(
-                unit_id=f"w{walk_index}",
+                unit_id=f"m{index}",
                 control_family=_REVIEW,
                 title="Source review",
-                rationale="Read this source against every control playbook.",
-                paths=chunk,
+                rationale=state.review_note or "Read these files.",
+                paths=paths[start : start + cap],
             )
         )
     return ctx.stamp(state.model_copy(update={"units": units}))
 
 
 def run_d4(state: RunState, ctx: StageContext) -> RunState:
-    """Check each unit against its playbook. Units already reviewed are skipped."""
+    """Read each unit once. A cited line is kept. A bad reply does not delete a finding."""
 
     findings = list(state.findings)
     dropped = list(state.dropped)
@@ -200,6 +151,8 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
     done = set(reviewed)
     pending = [unit for unit in state.units if unit.unit_id not in done]
     repo = Path(state.repo)
+    carried = [item for item in findings if item.origin == "assessment"]
+    known_rows = _known_rows(state, ctx)
     queued = len({path for unit in state.units for path in unit.paths})
     source_files = 0
     if state.scope is not None:
@@ -212,11 +165,19 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
         model_calls=ctx.model_calls,
     )
 
-    def worker(unit: WorkUnit) -> tuple[str, list[Finding], list[DroppedFinding], bool]:
-        return _review_unit(repo, unit, ctx)
+    def worker(unit: WorkUnit) -> tuple[str, list[Finding], list[DroppedFinding], list[str], bool]:
+        return _review_unit(repo, unit, ctx, carried, known_rows, state.run_id)
 
-    for unit_id, found, lost, keep in _map_work(ctx, pending, worker):
-        findings.extend(found)
+    for unit_id, found, lost, cleared, keep in _map_work(ctx, pending, worker):
+        if cleared:
+            gone = set(cleared)
+            findings = [item for item in findings if item.case_id not in gone]
+        present = {(item.file, item.line, item.rule_id) for item in findings}
+        for item in found:
+            key = (item.file, item.line, item.rule_id)
+            if key not in present:
+                findings.append(item)
+                present.add(key)
         dropped.extend(lost)
         if keep:
             reviewed.append(unit_id)
@@ -236,11 +197,10 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
 def bind_assessment(
     state: RunState,
 ) -> tuple[list[Finding], list[DroppedFinding]]:
-    """Keep assessment gaps whose file and line still exist on disk."""
+    """Keep a model finding when its file is still in scope and its line still exists."""
 
     if state.scope is None:
         raise UsageError("scope is missing")
-    allowed = {path for unit in state.units for path in unit.paths}
     scope_files = {item.path for item in state.scope.files}
     repo = Path(state.repo)
     kept: list[Finding] = []
@@ -249,11 +209,8 @@ def bind_assessment(
         if finding.origin != "assessment":
             kept.append(finding)
             continue
-        if finding.file not in scope_files or finding.file not in allowed:
+        if finding.file not in scope_files:
             dropped.append(_drop(finding, "unbound"))
-            continue
-        if finding.playbook not in PLAYBOOKS or finding.playbook != finding.control_family:
-            dropped.append(_drop(finding, "playbook"))
             continue
         snippet = source_line(repo, finding.file, finding.line)
         if snippet is None:
@@ -264,24 +221,9 @@ def bind_assessment(
 
 
 def run_d6(state: RunState, ctx: StageContext) -> RunState:
-    """Confirm, reject, or leave inconclusive each pending gap."""
+    """Leave model findings in place. Clearing happens in the same review call."""
 
-    dropped = list(state.dropped)
-    slots: list[Finding | None] = list(state.findings)
-    pending = [index for index, finding in enumerate(slots) if finding is not None and finding.verdict == "pending"]
-
-    def worker(index: int) -> tuple[int, Finding | None, DroppedFinding | None]:
-        finding = slots[index]
-        assert finding is not None
-        return (index, *_review_pending(finding, ctx))
-
-    for index, replacement, lost in _map_work(ctx, pending, worker):
-        if lost is not None:
-            dropped.append(lost)
-        slots[index] = replacement
-        ctx.note_progress(model_calls=ctx.model_calls)
-    kept = [finding for finding in slots if finding is not None]
-    return ctx.stamp(state.model_copy(update={"findings": kept, "dropped": dropped}))
+    return ctx.stamp(state)
 
 
 def _map_work(ctx: StageContext, items: list, worker):
@@ -318,121 +260,315 @@ def _map_work(ctx: StageContext, items: list, worker):
 
 
 def _review_unit(
-    repo: Path, unit: WorkUnit, ctx: StageContext
-) -> tuple[str, list[Finding], list[DroppedFinding], bool]:
+    repo: Path,
+    unit: WorkUnit,
+    ctx: StageContext,
+    carried: list[Finding],
+    known_rows: list[Finding],
+    run_id: str,
+) -> tuple[str, list[Finding], list[DroppedFinding], list[str], bool]:
     found: list[Finding] = []
     lost: list[DroppedFinding] = []
-    playbooks = _unit_playbooks(unit)
-    if not playbooks:
-        return unit.unit_id, found, lost, True
     excerpts = _excerpts(repo, unit.paths, ctx.config.budgets.max_excerpt_bytes)
     if not excerpts:
-        lost.append(
-            DroppedFinding(
-                rule_id=f"assessment-{unit.control_family}",
-                file=unit.paths[0],
-                line=1,
-                reason="no_excerpt",
-            )
-        )
-        return unit.unit_id, found, lost, True
-    graph_text = ctx.graph.summary(unit.paths)
-    rendered = "\n\n".join(playbook.render() for playbook in playbooks)
-    allowed = ", ".join(playbook.playbook_id for playbook in playbooks)
-    user = (
-        f"Objective: {unit.title}\n"
-        f"{rendered}\n\n"
-        f"Symbol graph:\n{graph_text}\n\n"
-        f"Source excerpts:\n{excerpts}\n\n"
-        'Return JSON {"gaps": [{"control_family", "playbook", "title", "file", '
-        '"line", "description", "remediation", "severity", "confidence"}]}. '
-        f"playbook must be one of: {allowed}. "
-        "file must be one of the excerpt paths. "
-        "line must be a line number shown in that excerpt. "
-        "Describe the control to add. "
-        "Use an empty gaps array when every control holds."
-    )
-    parsed = _ask(ctx, user, _GapList)
+        return unit.unit_id, found, lost, [], False
+    user = _review_prompt(repo, unit, ctx, carried, known_rows, excerpts)
+    raw = ctx.complete(_SYSTEM, user)
+    _store_reply(ctx, repo, run_id, raw if raw is not None else "(no reply)")
+    parsed = _read_review(raw)
     if parsed is None:
-        lost.append(
-            DroppedFinding(
-                rule_id=f"assessment-{unit.control_family}",
-                file=unit.paths[0],
-                line=1,
-                reason=_miss_reason(ctx),
-            )
-        )
-        return unit.unit_id, found, lost, not getattr(ctx._local, "refused", False)
-    if not parsed.gaps:
-        lost.append(
-            DroppedFinding(
-                rule_id=f"assessment-{unit.control_family}",
-                file=unit.paths[0],
-                line=1,
-                reason="empty",
-            )
-        )
-        return unit.unit_id, found, lost, True
-    limit = 8 if unit.control_family == _REVIEW else 5
-    for gap in parsed.gaps[:limit]:
-        playbook = playbook_for(gap.playbook) or playbook_for(gap.control_family)
-        if playbook is None or playbook not in playbooks:
-            lost.append(
-                DroppedFinding(
-                    rule_id=f"assessment-{unit.control_family}",
-                    file=unit.paths[0],
-                    line=1,
-                    reason="playbook",
-                )
-            )
-            continue
-        finding = _gap_to_finding(gap, unit, playbook)
+        return unit.unit_id, found, lost, [], False
+    observations, clears = parsed
+    for item in observations:
+        finding = _observation_to_finding(repo, unit, item)
         if finding is None:
             lost.append(
                 DroppedFinding(
-                    rule_id=f"assessment-{unit.control_family}",
+                    rule_id="assessment-review",
                     file=unit.paths[0],
                     line=1,
-                    reason="playbook",
+                    reason="line_out_of_range",
                 )
             )
             continue
         found.append(finding)
-    return unit.unit_id, found, lost, True
+    cleared = _cleared_ids(repo, unit, carried, clears)
+    return unit.unit_id, found, lost, cleared, True
 
 
-def _review_pending(
-    finding: Finding, ctx: StageContext
-) -> tuple[Finding | None, DroppedFinding | None]:
-    playbook = playbook_for(finding.playbook)
-    if playbook is None:
-        return None, _drop(finding, "playbook")
-    graph_text = ctx.graph.summary([finding.file])
-    user = (
-        f"{playbook.render()}\n\n"
-        f"Candidate: {finding.title} at {finding.file}:{finding.line}\n"
-        f"Description: {finding.description}\n"
-        f"Source line: {finding.snippet}\n"
-        f"Symbol graph:\n{graph_text}\n\n"
-        'Return JSON {"verdict": "confirmed" | "rejected" | "inconclusive", "reason": "..."}. '
-        "confirmed means the source line shows the gap named in the playbook. "
-        "rejected means the control holds or the line does not show that gap. "
-        "inconclusive means the line is not enough to decide."
+def _state_dir(ctx: StageContext) -> Path:
+    directory = getattr(ctx, "state_dir", None)
+    if isinstance(directory, Path):
+        return directory
+    return Path.home() / ".silentblue" / "state"
+
+
+def _carried_findings(repo: Path, dirname: str) -> list[Finding]:
+    path = repo / dirname / "findings.json"
+    if is_reparse_point(path) or not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rows = payload.get("findings", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+    carried: list[Finding] = []
+    if not isinstance(rows, list):
+        return []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("origin") != "assessment":
+            continue
+        try:
+            finding = Finding.model_validate(row)
+        except (ValidationError, ValueError):
+            continue
+        if CASE_ID.fullmatch(finding.case_id or ""):
+            carried.append(finding)
+    return carried
+
+
+def _known_rows(state: RunState, ctx: StageContext) -> list[Finding]:
+    from silentblue.detectors import detect
+
+    rows: list[Finding] = []
+    if state.scope is not None:
+        detected, _dropped = detect(Path(state.repo), state.scope)
+        rows.extend(detected)
+    for finding in _carried_report_rows(Path(state.repo), ctx.config.output.dirname):
+        if finding.rule_id == "dependency-vulnerable":
+            rows.append(finding)
+    return rows
+
+
+def _carried_report_rows(repo: Path, dirname: str) -> list[Finding]:
+    path = repo / dirname / "findings.json"
+    if is_reparse_point(path) or not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        rows = payload.get("findings", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return []
+    found: list[Finding] = []
+    if not isinstance(rows, list):
+        return []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            found.append(Finding.model_validate(row))
+        except (ValidationError, ValueError):
+            continue
+    return found
+
+
+def _review_prompt(
+    repo: Path,
+    unit: WorkUnit,
+    ctx: StageContext,
+    carried: list[Finding],
+    known_rows: list[Finding],
+    excerpts: str,
+) -> str:
+    open_cases = [
+        item
+        for item in carried
+        if item.file in unit.paths and CASE_ID.fullmatch(item.case_id or "")
+    ]
+    case_lines = [
+        (
+            f"- {item.case_id} {item.file}:{item.line} "
+            f"category {item.category or item.control_family}: {item.description}"
+        )
+        for item in open_cases
+    ]
+    recorded = [
+        f"- {item.rule_id} {item.file}:{item.line} {item.title}"
+        for item in known_rows
+        if item.file in unit.paths
+    ][:12]
+    graph_text = ctx.graph.summary(unit.paths) if ctx.graph_ready else "(none)"
+    return (
+        f"{_threat_card(repo, _state_dir(ctx))}\n\n"
+        "Open model findings on these files. Each stays open unless you cite "
+        "the line that now enforces the control.\n"
+        + ("\n".join(case_lines) or "(none)")
+        + "\n\nDetector and advisory rows already recorded for these paths:\n"
+        + ("\n".join(recorded) or "(none)")
+        + f"\n\nSymbol graph:\n{graph_text}\n\n"
+        f"Source excerpts:\n{excerpts}\n\n"
+        'Return one JSON object {"observations": [{"file", "line", "category", '
+        '"impact", "recommendation"}], "cleared": [{"case_id", "file", "line"}]}. '
+        "file and line must appear in the excerpts. "
+        "category is a short word you choose. "
+        "An observation is a missing or weak control. "
+        "A cleared item cites the line that shows the control in place. "
+        "Use an empty observations array when you see no new gap."
     )
-    parsed = _ask(ctx, user, _ReviewDraft)
-    if parsed is None:
-        return None, _drop(finding, _miss_reason(ctx))
-    verdict = parsed.verdict.strip().lower()
-    if verdict not in {"confirmed", "rejected", "inconclusive"}:
-        ctx.degraded = True
-        return None, _drop(finding, "unparseable")
-    if verdict == "rejected":
-        return None, _drop(finding, "rejected")
-    reason = redact(parsed.reason.strip())[:400]
-    description = finding.description
-    if reason:
-        description = f"{description}\nReview: {reason}"
-    return finding.model_copy(update={"verdict": verdict, "description": description}), None
+
+
+def _threat_card(repo: Path, state_dir: Path) -> str:
+    from silentblue.threat import threat_status
+
+    model, status = threat_status(repo, state_dir, None)
+    if model is None or status != "accepted":
+        return "No accepted threat model."
+    lines = ["Accepted threat model."]
+    for asset in model.assets[:12]:
+        files = ", ".join(asset.files) or "none"
+        lines.append(
+            f"Asset: {asset.name}. Expected control: {asset.expected_control}. Files: {files}"
+        )
+    for boundary in model.boundaries[:8]:
+        lines.append(
+            f"Boundary: {boundary.name}. Expected control: {boundary.expected_control}."
+        )
+    for assumption in model.assumptions[:8]:
+        lines.append(f"Assumption: {assumption}")
+    return "\n".join(lines)
+
+
+def _store_reply(ctx: StageContext, repo: Path, run_id: str, text: str) -> None:
+    with ctx._lock:
+        index = getattr(ctx, "reply_index", 0) + 1
+        ctx.reply_index = index
+    save_reply(_state_dir(ctx), repo, run_id, index, text)
+
+
+def _read_review(raw: str | None) -> tuple[list[dict], list[dict]] | None:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        data = _parse_json_object(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    clears = [item for item in data.get("cleared") or [] if isinstance(item, dict)]
+    items = None
+    for key in ("observations", "gaps", "findings", "candidates", "issues", "results"):
+        if isinstance(data.get(key), list):
+            items = data[key]
+            break
+    if items is None and _has_citation(data):
+        items = [data]
+    observations = []
+    for item in items or []:
+        if isinstance(item, dict):
+            normalized = _normalize_observation(item)
+            if normalized is not None:
+                observations.append(normalized)
+    return observations, clears
+
+
+def _has_citation(item: dict) -> bool:
+    file_name = ""
+    for key in ("file", "path", "filepath", "file_path", "filename"):
+        if item.get(key):
+            file_name = str(item[key])
+            break
+    return bool(file_name) and _as_line(item.get("line") or item.get("line_number")) is not None
+
+
+def _normalize_observation(item: dict) -> dict | None:
+    normalized = _normalize_gap(item)
+    relative = str(normalized.get("file") or "").replace("\\", "/").strip()
+    line = normalized.get("line")
+    if not relative or not isinstance(line, int) or line < 1:
+        return None
+    impact = str(
+        normalized.get("impact")
+        or normalized.get("description")
+        or ""
+    ).strip()
+    recommendation = str(
+        normalized.get("recommendation") or normalized.get("remediation") or ""
+    ).strip()
+    category = str(
+        normalized.get("category")
+        or normalized.get("control_family")
+        or normalized.get("playbook")
+        or "observation"
+    ).strip()
+    if not impact:
+        impact = "Cited control gap"
+    return {
+        "file": relative,
+        "line": line,
+        "category": category[:80],
+        "impact": impact[:800],
+        "recommendation": recommendation[:800],
+        "severity": normalized.get("severity") or "medium",
+        "confidence": normalized.get("confidence", 0.5),
+        "title": str(normalized.get("title") or category or "Cited control gap")[:200],
+    }
+
+
+def _observation_to_finding(repo: Path, unit: WorkUnit, item: dict) -> Finding | None:
+    relative = item["file"]
+    if relative not in unit.paths:
+        return None
+    snippet = source_line(repo, relative, item["line"])
+    if snippet is None:
+        return None
+    category = item["category"] or "observation"
+    playbook = _match_playbook(category)
+    family = playbook or category
+    slug = re.sub(r"[^a-z0-9]+", "-", category.lower()).strip("-") or "observation"
+    rule_id = f"assessment-{slug[:40]}"
+    severity: Severity = item["severity"] if item["severity"] in {"critical", "high", "medium", "low", "info"} else "medium"
+    confidence = item["confidence"] if isinstance(item["confidence"], (int, float)) and 0 <= item["confidence"] <= 1 else 0.5
+    recommendation = item["recommendation"]
+    matched = playbook_for(playbook) if playbook else None
+    if not recommendation and matched is not None:
+        recommendation = matched.remediation
+    if not recommendation:
+        recommendation = "Review this line and add the missing control."
+    return Finding(
+        case_id=case_id_for(relative, item["line"], rule_id),
+        rule_id=rule_id,
+        control_family=family[:80],
+        severity=severity,
+        title=item["title"],
+        file=relative,
+        line=item["line"],
+        description=redact(item["impact"])[:800],
+        remediation=redact(recommendation)[:800],
+        snippet=snippet,
+        confidence=float(confidence),
+        origin="assessment",
+        playbook=playbook,
+        category=category,
+        verdict="confirmed",
+    )
+
+
+def _cleared_ids(repo: Path, unit: WorkUnit, carried: list[Finding], clears: list[dict]) -> list[str]:
+    by_id = {item.case_id: item for item in carried if item.case_id}
+    chosen: list[str] = []
+    for item in clears:
+        case_id = str(item.get("case_id") or "")
+        finding = by_id.get(case_id)
+        if finding is None:
+            continue
+        relative = str(item.get("file") or item.get("path") or "").replace("\\", "/")
+        line = _as_line(item.get("line"))
+        if relative not in unit.paths or not isinstance(line, int):
+            continue
+        if source_line(repo, relative, line) is None:
+            continue
+        chosen.append(case_id)
+    return chosen
+
+
+def _match_playbook(category: str) -> str:
+    text = category.lower().replace("_", "-").replace(" ", "-")
+    if text in PLAYBOOKS:
+        return text
+    for playbook_id in PLAYBOOKS:
+        if playbook_id in text:
+            return playbook_id
+    return ""
 
 
 def source_line(repo: Path, relative: str, line: int, max_chars: int = 240) -> str | None:

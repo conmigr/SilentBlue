@@ -2,21 +2,21 @@
 
 Use this page when a command prints a line you did not expect. The run book stays in the [README](../README.md).
 
-Start with the checks that send no network traffic:
+Start with the checks that send no network traffic. The command is the same in PowerShell, Terminal, and a Linux shell:
 
-```powershell
+```text
 python -m silentblue doctor
 ```
 
 `doctor` prints the Python version, whether an env file loaded, the assess key state, `ca bundle:`, and `osv url:`. Inside `run`, ask `why is the CA bundle missing?` or `why did OSV fail?`. The answer uses the Python that is running the session.
 
-`python` and `python3` can be different programs. Certificates, `certifi`, and `SILENTBLUE_API_KEY` apply only to the program that printed the path. Quit the session after you change `.env` or install certificates, then start it again. A value already set in the terminal is kept. A `.env` inside the repository being scanned is ignored. Put the file in the Silent Blue directory, or in `~/.silentblue/.env`.
+`python` and `python3` can be different programs. Certificates, `certifi`, and `SILENTBLUE_API_KEY` apply only to the program that printed the path. Quit the session after you change `.env` or install certificates, then start it again. A value already set in the terminal is kept. A `.env` inside the repository being scanned is ignored. Put the file in the Silent Blue directory, or in `~/.silentblue/.env`. That path is the home directory on Windows, macOS, and Linux. On Windows it is the user profile, and Python accepts the `~` spelling.
 
 ## CA bundle missing
 
 `CA bundle: missing` means this Python cannot verify HTTPS. The OSV request is not sent. Detect findings are still written, and `Advisories` stays `degraded` if a scan continued.
 
-On a Mac, open Applications, open the Python folder for the same Python the session printed, and double-click `Install Certificates.command`. On Windows, install Python from python.org and install the Windows root certificate updates. Quit Silent Blue and start it again with that same command.
+On a Mac, open Applications, open the Python folder for the same Python the session printed, and double-click `Install Certificates.command`. On Windows, install Python from python.org and install the Windows root certificate updates. On Linux, install the operating system's CA certificates for that Python. Quit Silent Blue and start it again with that same command.
 
 If `certifi` is installed for that Python and its file sits outside the repository, Silent Blue uses that file.
 
@@ -56,7 +56,7 @@ Inside `run`, ask `what model am I using?`. `/status` and `python -m silentblue 
 
 Exit 2 means the run was refused before a report. Exit 1 with `assessment degraded` means the report was written and a model call failed. The finish line names the failure: `credential`, `unreachable`, `endpoint error`, or `empty reply`. `model endpoint rejected the credential` is the key. `model endpoint was unreachable` is the network or `SILENTBLUE_BASE_URL`.
 
-`The model was not called` means this scan made no request. `The model ran and returned no token counts` means the replies arrived without usage. `N calls returned tokens` means the model answered. `assessment gaps added: 0` with `dropped: empty` means each review returned a valid empty gaps array. Other dropped reasons are `playbook`, `unparseable`, `empty reply`, `rejected`, `no_excerpt`, and `budget`. `unparseable` means the text was not the JSON object the scan asked for. `empty reply` means the model sent no text. A fenced JSON object, a string line number, and `path` in place of `file` are accepted. The same rows are under `## Dropped findings` in the Markdown report.
+`The model was not called` means this scan made no request. `The model ran and returned no token counts` means the replies arrived without usage. `N calls returned tokens` means the model answered. `assessment gaps added: 0` with `Model review complete` means the model read the list and named no new gap. `model review incomplete` means at least one list path was not read. A failed call or a reply that is not a JSON object leaves that unit unread and does not remove a finding already on the report. An empty observations array means those files were read. A cited file and line is kept on the first reply. It stays open until a later reply cites a line that is still in the file. Replies are saved, redacted, under the state directory in `reviews/`, outside the repository. A fenced JSON object, a string line number, `path` in place of `file`, and the older `gaps` shape are accepted. The summary states detector count, OSV count, and list paths read.
 
 `/model draft` makes no model call. `/model draft assess` and `/scan assess` ask for `yes` before they spend.
 
@@ -74,7 +74,7 @@ A draft stays in the repository and does not reorder findings. `/model accept` r
 
 ## The report was refused or empty
 
-An empty scope exits 2 and writes no report. `hollow` means no source was sent for review. A linked `security-scan` directory exits 2 and is not followed. The state directory, `SILENTBLUE_STATE_DIR` or `~/.silentblue/state`, must sit outside the repository.
+An empty scope exits 2 and writes no report. `hollow` means no source was sent for review. A linked `security-scan` directory exits 2 and is not followed. The state directory, `SILENTBLUE_STATE_DIR` or `~/.silentblue/state`, must sit outside the repository. `~/.silentblue` is the home directory on Windows, macOS, and Linux.
 
 ## Deploy made no request
 

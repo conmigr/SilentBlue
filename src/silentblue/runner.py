@@ -464,6 +464,11 @@ def _assess_outcome(report: FinalReport, ctx: StageContext) -> str:
         sentence = f"{sentence}; dropped: {dropped}"
     if ctx.budget_exhausted:
         sentence = f"{sentence}; the call budget stopped further calls"
+    if report.metrics.model_review == "incomplete":
+        sentence = (
+            f"{sentence}; model review incomplete: "
+            f"{report.metrics.model_paths_read} of {report.metrics.model_paths} list paths"
+        )
     return sentence
 
 

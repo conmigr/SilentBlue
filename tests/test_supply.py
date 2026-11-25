@@ -123,6 +123,19 @@ def test_certifi_fills_an_empty_system_store(monkeypatch, tmp_path):
     assert note == "ok"
 
 
+def test_linux_with_no_store_names_the_system_certificates(monkeypatch):
+    import sys
+
+    from silentblue.supply import system_ca_note
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    note = system_ca_note()
+    assert "operating system's CA certificates" in note
+    assert "certifi" in note
+    assert "Leave SILENTBLUE_CA_BUNDLE unset" in note
+    assert "Install Certificates.command" not in note
+
+
 def test_a_mac_with_no_store_is_told_to_install_certificates(monkeypatch):
     import sys
 

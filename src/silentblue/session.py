@@ -45,8 +45,12 @@ _HELP = """\
 /cost                 Cost since this session started, by scan, assess, threat model, and NLP
 /findings             Gaps from the latest report
 show findings         Same as /findings
+/findings counts      Count of gaps by control category and severity
+/findings categories  Gaps grouped by control category
 /findings osv         Only the OSV rows from the latest report
 show osv findings     Same as /findings osv
+show supply chain findings
+                      Only that control category. The same form works for the others
 /finding <number>     One gap, with the same labels as the report. A case id also works
 /report               Paths of the written reports
 show report           Same as /report
@@ -226,6 +230,15 @@ class Session:
             return
         if command == "/findings osv":
             self._findings_osv()
+            return
+        if command == "/findings counts":
+            self._findings_counts()
+            return
+        if command == "/findings categories":
+            self._findings_categories()
+            return
+        if command.startswith("/findings category "):
+            self._findings_category(command.split(None, 2)[2])
             return
         if command == "/findings":
             self._findings()
@@ -470,6 +483,81 @@ class Session:
                 component = finding.component
                 package = f"  {component.ecosystem} {component.name} {component.version}".rstrip()
             self.writer(f"{index}  {advisory}{package}  {finding.file}:{finding.line}")
+
+    def _findings_counts(self) -> None:
+        rows = self._finding_rows()
+        if rows is None:
+            return
+        buckets: dict[str, dict[str, int]] = {}
+        for _index, finding in rows:
+            key = _category_key(finding)
+            bucket = buckets.setdefault(key, {name: 0 for name in _SEVERITIES})
+            if finding.severity in bucket:
+                bucket[finding.severity] += 1
+        ordered = sorted(buckets, key=lambda key: (-sum(buckets[key].values()), _category_label(key)))
+        width = max(len("Control category"), len("Total"), *(len(_category_label(key)) for key in ordered))
+        self.writer(_count_line("Control category", {name: name for name in _SEVERITIES}, "Total", width, header=True))
+        totals = {name: 0 for name in _SEVERITIES}
+        for key in ordered:
+            bucket = buckets[key]
+            for name in _SEVERITIES:
+                totals[name] += bucket[name]
+            self.writer(_count_line(_category_label(key), bucket, str(sum(bucket.values())), width))
+        self.writer(_count_line("Total", totals, str(sum(totals.values())), width))
+
+    def _findings_categories(self) -> None:
+        rows = self._finding_rows()
+        if rows is None:
+            return
+        groups: dict[str, list[tuple[int, Finding]]] = {}
+        for index, finding in rows:
+            groups.setdefault(_category_key(finding), []).append((index, finding))
+        for key in sorted(groups, key=lambda item: (-len(groups[item]), _category_label(item))):
+            self.writer(f"{_category_label(key)}  {len(groups[key])}")
+            self._write_rows(groups[key])
+
+    def _findings_category(self, name: str) -> None:
+        rows = self._finding_rows()
+        if rows is None:
+            return
+        keys = list(dict.fromkeys(_category_key(finding) for _index, finding in rows))
+        chosen = _pick_category(keys, name)
+        if chosen is None:
+            matched = [
+                (index, finding)
+                for index, finding in rows
+                if _norm(finding.category) == _norm(name)
+            ]
+            if not matched:
+                labels = ", ".join(_category_label(key) for key in sorted(keys, key=_category_label))
+                self.writer(f"No control category matches {name}. Categories: {labels}.")
+                return
+            self.writer(f"{name} findings: {len(matched)}")
+            self._write_rows(matched)
+            return
+        matched = [(index, finding) for index, finding in rows if _category_key(finding) == chosen]
+        self.writer(f"{_category_label(chosen)} findings: {len(matched)}")
+        self._write_rows(matched)
+
+    def _finding_rows(self) -> list[tuple[int, Finding]] | None:
+        if self._busy():
+            self.writer("A scan is running. Type /status for progress.")
+        self._load_report()
+        if self.report is None or not self.report.findings:
+            self.writer("No findings in the latest report.")
+            return None
+        return list(enumerate(self.report.findings, start=1))
+
+    def _write_rows(self, rows: list[tuple[int, Finding]]) -> None:
+        for index, finding in rows:
+            name = finding.advisory_id or finding.rule_id
+            package = ""
+            if finding.component is not None and finding.component.purl.startswith("pkg:"):
+                component = finding.component
+                package = f"  {component.ecosystem} {component.name} {component.version}".rstrip()
+            self.writer(f"{index}  {name}{package}  {finding.file}:{finding.line}")
+            if finding.threat_note:
+                self.writer(f"   {finding.threat_note}")
 
     def _finding(self, token: str) -> None:
         self._load_report()
@@ -717,6 +805,73 @@ class Session:
         self.writer(render_text(model, "accepted"))
         self.writer(f"Accepted hash  {digest}")
         self.writer("Acceptance is stored outside the repository. Findings stay open.")
+
+
+_SEVERITIES = ("critical", "high", "medium", "low", "info")
+
+
+def _category_key(finding: Finding) -> str:
+    text = (finding.control_family or finding.category or "unspecified").strip()
+    return text or "unspecified"
+
+
+def _category_label(key: str) -> str:
+    parts = [part for part in key.replace("_", "-").split("-") if part]
+    return " ".join(part.capitalize() for part in parts) or "Unspecified"
+
+
+def _norm(value: str) -> str:
+    return " ".join(value.lower().replace("_", " ").replace("-", " ").split())
+
+
+def _pick_category(keys: list[str], query: str) -> str | None:
+    wanted = _norm(query)
+    squashed = wanted.replace(" ", "")
+    exact = [
+        key
+        for key in keys
+        if _norm(key) == wanted or _norm(key).replace(" ", "") == squashed
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    close = [
+        key
+        for key in keys
+        if _close(_norm(key), wanted) or _close(_norm(key).replace(" ", ""), squashed)
+    ]
+    if len(close) == 1:
+        return close[0]
+    return None
+
+
+def _close(left: str, right: str) -> bool:
+    from silentblue.dialogue import _distance
+
+    return bool(left and right) and _distance(left, right) <= 2
+
+
+def _count_line(
+    label: str,
+    counts: dict[str, int] | dict[str, str],
+    total: str,
+    width: int,
+    *,
+    header: bool = False,
+) -> str:
+    if header:
+        cells = [_SEVERITY_LABELS[name].rjust(10) for name in _SEVERITIES]
+        return label.ljust(width) + "".join(cells) + "Total".rjust(10)
+    cells = [str(counts[name]).rjust(10) for name in _SEVERITIES]
+    return label.ljust(width) + "".join(cells) + total.rjust(10)
+
+
+_SEVERITY_LABELS = {
+    "critical": "Critical",
+    "high": "High",
+    "medium": "Medium",
+    "low": "Low",
+    "info": "Info",
+}
 
 
 def run_session(

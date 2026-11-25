@@ -47,18 +47,6 @@ def test_confirmed_gap_carries_playbook_line_and_verdict(workspace):
         [
             json.dumps(
                 {
-                    "objectives": [
-                        {
-                            "control_family": "injection",
-                            "title": "Query construction",
-                            "rationale": "Database calls",
-                            "paths": ["app.py"],
-                        }
-                    ]
-                }
-            ),
-            json.dumps(
-                {
                     "gaps": [
                         {
                             "control_family": "injection",
@@ -74,9 +62,6 @@ def test_confirmed_gap_carries_playbook_line_and_verdict(workspace):
                     ]
                 }
             ),
-            json.dumps(
-                {"verdict": "confirmed", "reason": "The query text is assembled on this line."}
-            ),
         ],
     )
     assert result.exit_code == 0
@@ -90,9 +75,13 @@ def test_confirmed_gap_carries_playbook_line_and_verdict(workspace):
     assert gap["verdict"] == "confirmed"
     assert gap["case_id"].startswith("sb1_")
     assert report["profile"] == "assess"
-    assert report["metrics"]["model_calls"] == 3
+    assert report["metrics"]["model_calls"] == 1
+    assert gap["category"] == "injection"
+    assert report["metrics"]["model_review"] == "complete"
     assert report["hollow"] is False
     markdown = next((workspace["repo"] / "security-scan").glob("*_report.md")).read_text(encoding="utf-8")
+    assert "Impact:" in markdown
+    assert "Recommendation:" in markdown
     assert "Playbook: injection" in markdown
     assert "Verdict: confirmed" in markdown
     assert any("read_user calls execute" in prompt for prompt in client.prompts)
@@ -104,18 +93,6 @@ def test_bad_line_is_dropped(workspace):
         workspace,
         source,
         [
-            json.dumps(
-                {
-                    "objectives": [
-                        {
-                            "control_family": "injection",
-                            "title": "Query construction",
-                            "rationale": "Database calls",
-                            "paths": ["app.py"],
-                        }
-                    ]
-                }
-            ),
             json.dumps(
                 {
                     "gaps": [
@@ -165,9 +142,7 @@ def test_prose_before_the_object_does_not_hide_the_json():
 def test_an_empty_model_reply_is_not_labeled_unparseable(workspace):
     class Empty:
         def complete(self, system: str, user: str) -> str:
-            if "Source excerpts" in user:
-                raise RunError("model reply was empty")
-            return json.dumps({"objectives": []})
+            raise RunError("model reply was empty")
 
     (workspace["repo"] / "app.py").write_text("value = 1\n", encoding="utf-8")
     result = run_scan(
@@ -179,53 +154,41 @@ def test_an_empty_model_reply_is_not_labeled_unparseable(workspace):
     )
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert result.exit_code == 1
-    assert any(item["reason"] == "empty reply" for item in report["dropped"])
+    assert "empty reply" in result.message
+    assert report["metrics"]["model_review"] == "incomplete"
     assert not any(item["reason"] == "unparseable" for item in report["dropped"])
 
 
-def test_invalid_json_is_dropped_and_degrades(workspace):
-    result, _client = _scan(
-        workspace,
-        "value = 1\n",
-        [
-            json.dumps(
-                {
-                    "objectives": [
-                        {
-                            "control_family": "configuration",
-                            "title": "Shared configuration",
-                            "rationale": "Settings",
-                            "paths": ["app.py"],
-                        }
-                    ]
-                }
-            ),
-            "not json",
-            "still not json",
-        ],
-        name="app.py",
-    )
-    assert result.exit_code == 1
-    assert "degraded" in result.message
+def test_invalid_json_leaves_the_review_incomplete(workspace):
+    result, _client = _scan(workspace, "value = 1\n", ["not json"], name="app.py")
+    assert result.exit_code == 0
+    assert "model review incomplete" in result.message
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert report["findings"] == []
     assert report["hollow"] is False
-    assert any(item["reason"] == "unparseable" for item in report["dropped"])
+    assert report["metrics"]["model_review"] == "incomplete"
+    assert not any(item["reason"] == "unparseable" for item in report["dropped"])
+    saved = list(workspace["state"].rglob("reply-*.txt"))
+    assert saved
+    assert "not json" in saved[0].read_text(encoding="utf-8")
+    assert workspace["repo"] not in saved[0].parents
 
 
-def test_empty_objectives_still_reads_source(workspace):
+def test_empty_observations_still_reads_the_file(workspace):
     result, client = _scan(
         workspace,
         "value = 1\n",
-        [json.dumps({"objectives": []}), json.dumps({"gaps": []})],
+        [json.dumps({"observations": []})],
     )
     assert result.exit_code == 0
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert report["findings"] == []
     assert report["hollow"] is False
-    assert report["metrics"]["model_calls"] == 2
+    assert report["metrics"]["model_calls"] == 1
+    assert report["metrics"]["model_review"] == "complete"
     assert "assessment gaps added: 0" in result.message
-    assert "dropped: empty 1" in result.message
+    assert "dropped:" not in result.message
+    assert "Model read 1 of 1 list paths" in report["summary"]
     assert "untrusted" not in report["summary"]
     assert any("1|value = 1" in prompt for prompt in client.prompts)
 

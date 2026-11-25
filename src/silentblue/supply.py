@@ -55,6 +55,7 @@ def system_ca_note() -> str:
     return (
         base
         + " Install this operating system's CA certificates for Python."
+        + " Silent Blue also uses certifi for this same Python when that file sits outside the repository."
         + " Quit Silent Blue and start it again. Leave SILENTBLUE_CA_BUNDLE unset."
     )
 

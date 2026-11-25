@@ -158,8 +158,12 @@ def deduplicate(
 ) -> tuple[list[Finding], list[DroppedFinding]]:
     """Collapse nearby hits of the same rule in the same file."""
 
+    assessment = [finding for finding in findings if finding.origin == "assessment"]
     grouped: dict[tuple[str, str], list[Finding]] = {}
-    for finding in sorted(findings, key=lambda item: (item.file, item.rule_id, item.line)):
+    for finding in sorted(
+        (item for item in findings if item.origin != "assessment"),
+        key=lambda item: (item.file, item.rule_id, item.line),
+    ):
         grouped.setdefault((finding.file, finding.rule_id), []).append(finding)
     kept: list[Finding] = []
     dropped: list[DroppedFinding] = []
@@ -179,7 +183,7 @@ def deduplicate(
         if cluster:
             kept.append(_collapse(cluster, dropped))
     kept.sort(key=lambda finding: (finding.file, finding.line, finding.rule_id))
-    return kept, dropped
+    return [*assessment, *kept], dropped
 
 
 def _collapse(cluster: list[Finding], dropped: list[DroppedFinding]) -> Finding:

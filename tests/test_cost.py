@@ -46,7 +46,7 @@ def test_assess_estimate_is_bounded_by_the_call_budget():
         provider="openai",
         model_name="gpt-6.1-terra",
     )
-    assert estimate.calls == 3
+    assert estimate.calls == 1
     assert estimate.cost_usd is not None
     assert estimate.cost_usd > 0
     assert dollars(1_000_000, 0, (1.0, 5.0)) == 1.0

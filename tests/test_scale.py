@@ -52,7 +52,7 @@ def test_review_units_overlap(workspace, monkeypatch):
     findings = json.loads(
         next((workspace["repo"] / "security-scan").glob("*findings.json")).read_text(encoding="utf-8")
     )
-    assert "2 of" in findings["summary"] or "source files" in findings["summary"]
+    assert "Model read 8 of 8 list paths" in findings["summary"]
     assert findings["metrics"]["files_reviewed"] == 8
     assert findings["metrics"]["source_files"] == 8
 
