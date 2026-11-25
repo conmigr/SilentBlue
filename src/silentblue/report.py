@@ -63,10 +63,21 @@ def build_report(
         tail = f"This profile makes no model calls. {cost}"
     else:
         tail = f"The assess profile made {metrics.model_calls} model calls. {cost}"
-    if profile == "assess" and metrics.source_files:
-        tail += (
-            f" The model read {metrics.files_reviewed} of {metrics.source_files} source files."
+    if metrics.model_review:
+        detectors = sum(
+            1
+            for finding in findings
+            if finding.origin == "detector" and finding.rule_id != "dependency-vulnerable"
         )
+        advisories = sum(1 for finding in findings if finding.rule_id == "dependency-vulnerable")
+        tail += (
+            f" Detectors reported {detectors}. OSV reported {advisories}. "
+            f"Model read {metrics.model_paths_read} of {metrics.model_paths} list paths."
+        )
+        if metrics.model_review == "incomplete":
+            tail += " Model review incomplete."
+        else:
+            tail += " Model review complete."
     if hollow:
         tail += " This empty result is untrusted: no source was sent for review."
     if threat_state == "accepted":
@@ -218,6 +229,8 @@ def _metric_lines(metrics: Metrics) -> list[str]:
         f"Dropped: {metrics.dropped}",
         f"Symlink escapes excluded: {metrics.symlink_escapes}",
         f"Model calls: {metrics.model_calls}",
+        f"Model list: {metrics.model_paths_read} of {metrics.model_paths} read",
+        f"Model review: {metrics.model_review or 'not run'}",
         f"Estimated model calls: {metrics.estimated_calls}",
         f"Estimated cost USD: {format_usd(metrics.estimated_cost_usd, metrics.rate_known)}",
         f"Actual cost USD: {format_usd(metrics.actual_cost_usd, metrics.usage_known and metrics.rate_known)}",
@@ -323,6 +336,8 @@ def finding_fields(finding: Finding) -> list[tuple[str, str]]:
         ("Confidence", format(finding.confidence, "g")),
         ("Verdict", finding.verdict),
     ]
+    if finding.category:
+        fields.append(("Category", finding.category))
     if finding.playbook:
         fields.append(("Playbook", finding.playbook))
     if finding.cvss_score is not None:
@@ -351,13 +366,15 @@ def finding_fields(finding: Finding) -> list[tuple[str, str]]:
 def finding_sections(finding: Finding) -> list[tuple[str, str]]:
     """Headed prose. Description, evidence, and remediation are always present."""
 
+    impact = "Impact" if finding.origin == "assessment" else "Description"
+    repair = "Recommendation" if finding.origin == "assessment" else "Remediation"
     sections = [
-        ("Description", finding.description),
+        (impact, finding.description),
         ("Evidence", finding.snippet),
     ]
     if finding.threat_note:
         sections.append(("Threat model", finding.threat_note))
-    sections.append(("Remediation", finding.remediation))
+    sections.append((repair, finding.remediation))
     return sections
 
 
@@ -451,6 +468,20 @@ def _metrics(state: RunState, findings: list[Finding]) -> Metrics:
     files_reviewed = len(
         {path for unit in state.units if unit.unit_id in reviewed for path in unit.paths}
     )
+    model_paths = len(state.review_paths)
+    model_paths_read = len(
+        {
+            path
+            for unit in state.units
+            if unit.unit_id in reviewed
+            for path in unit.paths
+            if path in set(state.review_paths)
+        }
+    )
+    if state.review_note or state.review_paths:
+        model_review = "complete" if model_paths_read == model_paths else "incomplete"
+    else:
+        model_review = ""
     made_calls = state.model_calls > 0
     spent, spent_rate_known = actual_cost(
         state.input_tokens,
@@ -485,6 +516,9 @@ def _metrics(state: RunState, findings: list[Finding]) -> Metrics:
         price_date=PRICE_DATE,
         model_provider=state.model_provider,
         model_name=state.model_name,
+        model_paths=model_paths,
+        model_paths_read=model_paths_read,
+        model_review=model_review,
     )
 
 
@@ -614,6 +648,8 @@ def render_html(report: FinalReport) -> str:
             ("Estimated cost USD", format_usd(metrics.estimated_cost_usd, metrics.rate_known)),
             ("Actual cost USD", format_usd(metrics.actual_cost_usd, actual_known)),
             ("Model calls", str(metrics.model_calls)),
+            ("Model list", f"{metrics.model_paths_read} of {metrics.model_paths} read"),
+            ("Model review", metrics.model_review or "not run"),
             ("Price table", metrics.price_date or "none"),
         )
     )

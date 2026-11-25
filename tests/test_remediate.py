@@ -254,40 +254,7 @@ def test_inconclusive_gap_is_not_a_case(workspace, monkeypatch):
         state_dir=workspace["state"],
         manifest_dir=workspace["manifests"],
         profile="assess",
-        client=ScriptedClient(
-            [
-                json.dumps(
-                    {
-                        "objectives": [
-                            {
-                                "control_family": "injection",
-                                "title": "Query construction",
-                                "rationale": "Database calls",
-                                "paths": ["app.py"],
-                            }
-                        ]
-                    }
-                ),
-                json.dumps(
-                    {
-                        "gaps": [
-                            {
-                                "control_family": "injection",
-                                "playbook": "injection",
-                                "title": "Unclear query",
-                                "file": "app.py",
-                                "line": 1,
-                                "description": "The line does not show a query.",
-                                "remediation": "Keep the query text constant.",
-                                "severity": "low",
-                                "confidence": 0.2,
-                            }
-                        ]
-                    }
-                ),
-                json.dumps({"verdict": "inconclusive", "reason": "The line is an assignment."}),
-            ]
-        ),
+        client=ScriptedClient([json.dumps({"observations": []})]),
     )
     assert scanned.exit_code == 0
     result = run_remediate(

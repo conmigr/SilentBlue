@@ -118,6 +118,46 @@ def _inject_osv(repo) -> None:
     path.write_text(updated.model_dump_json(indent=2), encoding="utf-8")
 
 
+def test_findings_count_by_category_then_filter(workspace):
+    repo = _repo(workspace)
+    pending = iter(
+        [
+            "show findings count by control category",
+            "show findings by control category",
+            "show supply chain findings",
+            "/quit",
+        ]
+    )
+    injected = False
+
+    def reader() -> str:
+        nonlocal injected
+        if not injected:
+            _inject_osv(repo)
+            injected = True
+        return next(pending)
+
+    output: list[str] = []
+    code = run_session(
+        repo,
+        state_dir=workspace["state"],
+        manifest_dir=workspace["manifests"],
+        reader=reader,
+        writer=output.append,
+    )
+    text = "\n".join(output)
+    assert code == 0
+    assert "Control category" in text
+    assert "Critical" in text
+    assert "Supply Chain" in text
+    assert "Injection" in text
+    assert "Supply Chain findings: 1" in text
+    assert "GHSA-aaaa-bbbb-cccc" in text
+    assert "sql-unparameterized" in text
+    supply_at = text.rfind("Supply Chain findings: 1")
+    assert "sql-unparameterized" not in text[supply_at:]
+
+
 def test_show_osv_findings_lists_only_advisories(workspace):
     repo = _repo(workspace)
     pending = iter(["show osv findings", "/finding " + "sb1_" + "cd" * 16, "/quit"])

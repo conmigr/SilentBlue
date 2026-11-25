@@ -17,7 +17,6 @@ from silentblue.errors import UsageError
 PRICE_DATE = "2026-11-18"
 _ASSUMED_OUTPUT_TOKENS = 400
 _CHARS_PER_TOKEN = 4
-_D2_SAMPLE_BYTES = 1500 * 3
 _REVIEW_PROMPT_TOKENS = 200
 
 # (provider, model) -> (input USD per 1M, output USD per 1M)
@@ -92,20 +91,21 @@ def estimate_spend(
     provider: str,
     model_name: str,
 ) -> SpendEstimate:
-    """Bound an assess run by the call and excerpt budgets. Detect stays at zero."""
+    """Bound an assess run by the call budget. Detect stays at zero.
+
+    The scan builds the real file list first. This estimate uses the source
+    tree, one call per unit, and stops at max_calls.
+    """
 
     if profile != "assess" or source_files <= 0:
         return SpendEstimate(0, 0, 0, 0.0, True, "", "", PRICE_DATE, source_files, 0, 0)
     per_unit = max(1, max_files_per_unit)
-    chunks = min(max_units, math.ceil(source_files / per_unit))
-    files_covered = min(source_files, chunks * per_unit)
-    named = 1 + chunks
-    reviews = min(chunks, max(0, max_calls - named))
-    calls = min(max_calls, named + reviews)
+    chunks = math.ceil(source_files / per_unit)
+    calls = min(max_calls, chunks)
+    files_covered = min(source_files, calls * per_unit)
     files_in_unit = min(per_unit, source_files)
     unit_tokens = (max_excerpt_bytes * files_in_unit) // _CHARS_PER_TOKEN
-    input_tokens = (_D2_SAMPLE_BYTES // _CHARS_PER_TOKEN) + (unit_tokens * chunks)
-    input_tokens += _REVIEW_PROMPT_TOKENS * reviews
+    input_tokens = (unit_tokens + _REVIEW_PROMPT_TOKENS) * calls
     output_tokens = _ASSUMED_OUTPUT_TOKENS * calls
     rate = rate_for(provider, model_name)
     cost = dollars(input_tokens, output_tokens, rate) if rate is not None else None

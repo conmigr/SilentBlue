@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 
 from silentblue.errors import RunError
-from silentblue.models import Finding
+from silentblue.models import CASE_ID, Finding
 
 _SEVERITY = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -36,6 +36,15 @@ def prioritize(findings: list[Finding]) -> list[Finding]:
     seen: set[str] = set()
     ranked: list[Finding] = []
     for finding in ordered:
+        if (
+            finding.origin == "assessment"
+            and CASE_ID.fullmatch(finding.case_id or "")
+            and finding.case_id not in seen
+        ):
+            case_id = finding.case_id
+            seen.add(case_id)
+            ranked.append(finding)
+            continue
         case_id = case_id_for(
             finding.file, finding.line, finding.rule_id, salt=finding.advisory_id
         )

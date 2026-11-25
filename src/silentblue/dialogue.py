@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from silentblue.playbooks import PLAYBOOKS
+
 Action = Literal["tool", "ask", "say", "refuse", "none"]
 
 MISSION = (
@@ -32,7 +34,8 @@ ROUTER_SYSTEM = (
     "A question about the CA bundle uses topic ca. A question about why OSV did not run uses topic osv. "
     "A question about which AI model is configured uses topic model. "
     "Do not explain the cause or the route yourself. "
-    "Commands are only: /help, /status, /findings, /findings osv, /finding <number or case id>, "
+    "Commands are only: /help, /status, /findings, /findings counts, /findings categories, "
+    "/findings category <name>, /findings osv, /finding <number or case id>, "
     "/report, /model, /model draft, /model draft assess, /model accept, "
     "/model assume <text>, /scan, /scan assess, /scan osv, /scan assess osv, "
     "/scan resume, /deploy, /cost, /quit. "
@@ -46,6 +49,8 @@ _COMMANDS = frozenset(
         "/help",
         "/status",
         "/findings",
+        "/findings counts",
+        "/findings categories",
         "/findings osv",
         "/report",
         "/model",
@@ -135,6 +140,11 @@ _MISSION_PATTERNS = (
     re.compile(r"do not (?:write|record)\s+(?:the\s+)?findings"),
 )
 _CASE = re.compile(r"^sb1_[0-9a-f]{32}$")
+_CATEGORY_NAME = re.compile(r"[a-z0-9][a-z0-9 _-]*")
+_FAMILIES = tuple(PLAYBOOKS) + ("deployment",)
+_CATEGORY_SKIP = frozenset(
+    {"show", "list", "open", "get", "only", "for", "in", "with", "by", "control", "family", "families", "all"}
+)
 
 
 @dataclass(frozen=True)
@@ -172,6 +182,11 @@ def interpret(line: str) -> Decision:
         return Decision("say", reason=topic)
     if _model_topic(content):
         return Decision("say", reason="model")
+    if any(content == phrase for phrase, _command in _PHRASES):
+        return _phrase(content)
+    category = _category_request(content)
+    if category is not None:
+        return category
     return _phrase(content)
 
 
@@ -258,6 +273,11 @@ def _slash(raw: str, lowered: str) -> Decision | None:
         return None
     if lowered in _COMMANDS:
         return Decision("tool", command=lowered)
+    if lowered.startswith("/findings category "):
+        name = " ".join(lowered.split(None, 2)[2].split())
+        if name and len(name) <= 80 and _CATEGORY_NAME.fullmatch(name):
+            return Decision("tool", command=f"/findings category {name}")
+        return Decision("refuse", reason="tool")
     if lowered.startswith("/finding "):
         token = raw.split(None, 1)[1].strip()
         if token.isdigit() or _CASE.fullmatch(token):
@@ -322,6 +342,55 @@ def _finding(content: str) -> str | None:
     return None
 
 
+def _category_request(content: str) -> Decision | None:
+    """Map a findings sentence to the count matrix, the grouped list, or one category."""
+
+    tokens = content.split()
+    if not tokens or not any(_near(token, "finding") or _near(token, "findings") for token in tokens):
+        return None
+    if any(token in {"osv", "osvs"} or token.startswith("advis") for token in tokens):
+        return None
+    counted = any(_near(token, "count") or _near(token, "counts") or _near(token, "matrix") for token in tokens)
+    grouped = any(
+        _near(token, word)
+        for token in tokens
+        for word in ("category", "categories", "family", "families")
+    )
+    if counted:
+        return Decision("tool", command="/findings counts")
+    if grouped:
+        return Decision("tool", command="/findings categories")
+    kept = [
+        token
+        for token in tokens
+        if token not in _CATEGORY_SKIP
+        and not _near(token, "finding")
+        and not _near(token, "findings")
+        and not _near(token, "show")
+    ]
+    if not kept:
+        return None
+    words = " ".join(kept)
+    return Decision("tool", command=f"/findings category {_known_family(words)}")
+
+
+def _known_family(words: str) -> str:
+    cleaned = " ".join(words.lower().replace("_", " ").replace("-", " ").split())
+    squashed = cleaned.replace(" ", "")
+    matches: list[str] = []
+    for family in _FAMILIES:
+        label = family.replace("-", " ")
+        bare = family.replace("-", "")
+        if cleaned == label or squashed == bare:
+            matches.append(family)
+            continue
+        if len(label) >= 6 and (_distance(cleaned, label) <= 1 or _distance(squashed, bare) <= 1):
+            matches.append(family)
+    if len(matches) == 1:
+        return matches[0]
+    return cleaned
+
+
 def _assumption(raw: str, content: str) -> str | None:
     parts = content.split(None, 1)
     if len(parts) < 2 or not (_near(parts[0], "assume") or parts[0] == "assumption"):
@@ -346,6 +415,9 @@ def _confirms(command: str) -> bool:
 def _allowed(command: str) -> bool:
     if command in _COMMANDS:
         return True
+    if command.startswith("/findings category "):
+        name = command.split(None, 2)[2].strip()
+        return bool(name) and len(name) <= 80 and _CATEGORY_NAME.fullmatch(name) is not None
     if command.startswith("/finding "):
         token = command.split(None, 1)[1]
         return token.isdigit() or _CASE.fullmatch(token) is not None

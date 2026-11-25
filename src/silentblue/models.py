@@ -81,6 +81,7 @@ class Finding(BaseModel):
     confidence: float = Field(ge=0, le=1)
     origin: Literal["detector", "assessment", "imported", "deployment"] = "detector"
     playbook: str = ""
+    category: str = ""
     verdict: Verdict = "detector"
     also_at: list[int] = Field(default_factory=list)
     threat_note: str = ""
@@ -192,6 +193,8 @@ class RunState(BaseModel):
     advisories: Literal["off", "queried", "degraded"] = "off"
     advisory_note: str = ""
     advisory_fingerprint: str = ""
+    review_paths: list[str] = Field(default_factory=list)
+    review_note: str = ""
 
 
 class CheckpointEnvelope(BaseModel):
@@ -234,6 +237,9 @@ class Metrics(BaseModel):
     price_date: str = ""
     model_provider: str = ""
     model_name: str = ""
+    model_paths: int = 0
+    model_paths_read: int = 0
+    model_review: str = ""
 
 
 class FinalReport(BaseModel):

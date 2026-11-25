@@ -39,6 +39,21 @@ def test_a_cost_sentence_maps_with_a_small_typo():
     assert decision.command == "/cost"
 
 
+def test_findings_can_be_counted_and_filtered_by_category():
+    grouped = interpret("Show findings by control category")
+    counts = interpret("show findings count by control category")
+    typo = interpret("shwo findngs count by control categroy")
+    supply = interpret("Show me the Supply Chain findings")
+    slipped = interpret("suply chain findings")
+    assert grouped.command == "/findings categories"
+    assert counts.command == "/findings counts"
+    assert typo.command == "/findings counts"
+    assert supply.command == "/findings category supply-chain"
+    assert slipped.command == "/findings category supply-chain"
+    assert interpret("show findings").command == "/findings"
+    assert interpret("show osv findings").command == "/findings osv"
+
+
 def test_small_typos_map_to_the_same_command():
     findings = interpret("shwo findngs")
     scan = interpret("scna osv")
