@@ -234,12 +234,17 @@ def test_osv_fills_cvss_and_a_failed_query_exits_1(workspace, monkeypatch):
     assert first["component"]["fixed_version"] == "2.32.4"
     assert first["component"]["relationship"] == "direct"
     markdown = next((repo / "security-scan").glob("*_report.md")).read_text(encoding="utf-8")
-    assert "CVSS score: 9.8" in markdown
-    assert "CVSS version: 3.1" in markdown
-    assert f"CVSS vector: {_VECTOR}" in markdown
-    assert "Component: PyPI requests 2.32.3" in markdown
-    assert "Package URL: pkg:pypi/requests@2.32.3" in markdown
-    assert "Fixed: 2.32.4" in markdown
+    assert f"CVSS 3.1 9.8 {_VECTOR}" in markdown
+    assert "Component PyPI requests 2.32.3" in markdown
+    assert "Fixed 2.32.4" in markdown
+    assert "requests==2.32.4" in first["remediation"]
+    assert "python -m pip install -r requirements.txt" in first["remediation"]
+    assert "Do not add a proof-of-concept" in first["remediation"]
+    assert "not 2.32.3" in first["remediation"]
+    second = next(item for item in vulns if item["advisory_id"] == "GHSA-dddd-eeee-ffff")
+    assert second["component"]["fixed_version"] == ""
+    assert "does not name a fixed version" in second["remediation"]
+    assert "Do not guess a version" in second["remediation"]
 
     def fail(_payload, _context):
         raise OSError("down")
@@ -378,3 +383,44 @@ def test_opening_scan_drops_osv_rows_when_the_package_set_was_not_recorded(works
     assert "did not record the package set" in kept.message
     report = json.loads(path.read_text(encoding="utf-8"))
     assert report["advisories"] == "off"
+
+
+def test_fixed_version_is_the_lowest_newer_release():
+    from silentblue.repair import choose_fixed, upgrade_remediation
+
+    assert choose_fixed("2.32.3", ["1.2.0", "2.32.4", "2.33.0"]) == ("2.32.4", "")
+    assert choose_fixed("2.32.3", ["1.2.0"]) == ("", "not-newer")
+    assert choose_fixed("2.32.3", []) == ("", "none")
+    chosen, reason = choose_fixed("1.0.0-debian", ["2.0.0"])
+    assert chosen == "2.0.0"
+    assert reason == "unordered"
+    npm = upgrade_remediation(
+        ecosystem="npm",
+        name="left-pad",
+        version="1.2.3",
+        file="web/package-lock.json",
+        line=40,
+        advisory_id="GHSA-npm",
+        fixed="1.3.0",
+        reason="",
+        fixes=["1.3.0"],
+        direct=False,
+    )
+    assert "npm install left-pad@1.3.0 --save-exact" in npm
+    assert "In web" in npm
+    assert "left-pad is transitive" in npm
+    assert "strict-ssl" in npm
+    go = upgrade_remediation(
+        ecosystem="Go",
+        name="example.com/mod",
+        version="v1.2.2",
+        file="go.mod",
+        line=4,
+        advisory_id="GO-1",
+        fixed="1.2.3",
+        reason="",
+        fixes=["1.2.3"],
+        direct=True,
+    )
+    assert "go get example.com/mod@v1.2.3" in go
+    assert "checksum database" in go

@@ -23,6 +23,7 @@ from pathlib import Path
 from silentblue.models import ComponentDetail, FinalReport, Finding, RunState, ScopeResult
 from silentblue.paths import is_reparse_point, is_within
 from silentblue.redact import redact
+from silentblue.repair import choose_fixed, upgrade_remediation
 
 KEPT_NOTE = "Kept from the last OSV query. Resolved packages are unchanged."
 CHANGED_NOTE = "OSV rows were not kept. The resolved packages changed. Type /scan osv."
@@ -97,9 +98,18 @@ _CA_ASSIGN = re.compile(
 _PIP_CERT = re.compile(r"(?i)^\s*cert\s*=\s*(\S+)")
 _NPM_CAFILE = re.compile(r"(?i)^\s*cafile\s*=\s*(\S+)")
 
-_INSTALL_REPAIR = "Leave certificate verification on for the install, and fetch the package over TLS."
-_CA_REPAIR = "Point the install at a CA bundle that is present in the repository, or use the system bundle."
-_PIN_REPAIR = "Pin the dependency to a reviewed version and fetch it over TLS."
+_INSTALL_REPAIR = (
+    "Delete the installer setting that turns certificate verification off. "
+    "Fetch the package over https and leave the default trust store in place."
+)
+_CA_REPAIR = (
+    "Point the install config at a CA bundle file that exists in the repository, "
+    "or delete the relative path and use the system trust store."
+)
+_PIN_REPAIR = (
+    "Replace the version range with an exact version, commit the lockfile, and fetch over https. "
+    "Delete cleartext http:// URLs and --trusted-host."
+)
 _OSV_FAMILY = "supply-chain"
 
 _AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}
@@ -911,7 +921,6 @@ def _findings_for(package: _Package, result: dict) -> list[Finding]:
             continue
         score, vector, version = _best_cvss(vuln)
         severity, confidence = _rank(score)
-        fixed = _fixed_version(vuln, package)
         summary = str(vuln.get("summary") or "An advisory names this version.").strip()
         if len(summary) > 400:
             summary = summary[:400]
@@ -921,6 +930,8 @@ def _findings_for(package: _Package, result: dict) -> list[Finding]:
         relation = {"direct": " Direct dependency.", "transitive": " Transitive dependency."}.get(
             relationship, ""
         )
+        fixes = _fixed_versions(vuln, package)
+        fixed, reason = choose_fixed(package.version, fixes)
         component = ComponentDetail(
             ecosystem=package.ecosystem,
             name=package.name,
@@ -929,10 +940,18 @@ def _findings_for(package: _Package, result: dict) -> list[Finding]:
             fixed_version=fixed,
             relationship=relationship,  # type: ignore[arg-type]
         )
-        if fixed:
-            remediation = f"Upgrade {package.name} to {fixed}."
-        else:
-            remediation = f"Upgrade {package.name} to a version that fixes {advisory_id}."
+        remediation = upgrade_remediation(
+            ecosystem=package.ecosystem,
+            name=package.name,
+            version=package.version,
+            file=package.file,
+            line=package.line,
+            advisory_id=advisory_id,
+            fixed=fixed,
+            reason=reason,
+            fixes=fixes,
+            direct=package.direct,
+        )
         findings.append(
             Finding(
                 rule_id="dependency-vulnerable",
@@ -1023,10 +1042,11 @@ def _rank(score: float | None) -> tuple[str, float]:
     return "low", 0.9
 
 
-def _fixed_version(vuln: dict, package: _Package) -> str:
+def _fixed_versions(vuln: dict, package: _Package) -> list[str]:
     affected = vuln.get("affected") or []
     if not isinstance(affected, list):
-        return ""
+        return []
+    found: list[str] = []
     for item in affected:
         if not isinstance(item, dict):
             continue
@@ -1048,9 +1068,12 @@ def _fixed_version(vuln: dict, package: _Package) -> str:
             if not isinstance(events, list):
                 continue
             for event in events:
-                if isinstance(event, dict) and event.get("fixed"):
-                    return str(event["fixed"])
-    return ""
+                if not isinstance(event, dict) or not event.get("fixed"):
+                    continue
+                text = str(event["fixed"]).strip()
+                if text and text not in found:
+                    found.append(text)
+    return found
 
 
 def _purl(package: _Package) -> str:

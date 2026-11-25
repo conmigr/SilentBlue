@@ -110,14 +110,13 @@ def test_full_scan_reports_agree_and_redact(workspace):
         assert item["cvss_score"] is not None
         assert item["component"]["name"] == item["file"]
     assert "\n## Finding 1:" in markdown
-    assert "CVSS score:" in markdown
-    assert "CVSS version: 3.1" in markdown
-    assert "CVSS vector: CVSS:3.1/" in markdown
-    assert "\nFile: " in markdown
-    assert "\nLine: " in markdown
+    assert "CVSS 3.1 " in markdown
+    assert "CVSS:3.1/" in markdown
     assert "\nDescription:" in markdown
     assert "\nEvidence:" in markdown
     assert "\nRemediation:" in markdown
+    assert "Apply this in " in markdown
+    assert "Do not add a proof-of-concept" in markdown
     assert "**CVSS:**" not in markdown
     assert list((workspace["repo"] / "security-scan").glob("*_report.yaml")) == []
     ids = [item["case_id"] for item in reported]

@@ -23,7 +23,9 @@ from silentblue.models import (
 from silentblue.paths import is_reparse_point, is_within
 from silentblue.scope import is_source_path
 from silentblue.rank import prioritize
+from silentblue.scanledger import ledger_from_state
 from silentblue.redact import redact
+from silentblue.repair import APPLY_MARK, apply_note
 
 _LEVEL = {
     "critical": "error",
@@ -86,6 +88,17 @@ def build_report(
         tail += " The threat model acceptance no longer matches, so severity order is used."
     elif threat_state == "draft":
         tail += " A draft threat model is present and is not used for order."
+    if state.scope is not None and state.scope.mirror_dirs:
+        shown = ", ".join(state.scope.mirror_dirs[:8])
+        tail += f" Mirror directories were not scanned: {shown}."
+    coverage = ledger_from_state(state)
+    if coverage.rows:
+        if coverage.saturated:
+            tail += " Coverage saturated."
+        else:
+            tail += " Coverage unsaturated."
+        if coverage.unread:
+            tail += f" Unread review paths: {len(coverage.unread)}."
     if state.advisories == "queried" and state.advisory_note.startswith("Kept from the last OSV query"):
         tail += f" {state.advisory_note}"
     elif state.advisories == "queried":
@@ -113,6 +126,7 @@ def build_report(
         advisory_fingerprint=state.advisory_fingerprint,
         stages=stages,
         metrics=metrics,
+        coverage=coverage if coverage.rows or coverage.unread else None,
         findings=findings,
         dropped=state.dropped,
     )
@@ -162,62 +176,104 @@ def write_report(
     return written
 
 
-def render_markdown(report: FinalReport) -> str:
-    """Human report. Each finding is a labeled block."""
+_SEVERITIES = ("critical", "high", "medium", "low", "info")
+_STAGE_TITLES = {
+    "d0": "Scope",
+    "d1": "Context",
+    "d2": "Review list",
+    "d3": "Units",
+    "d4": "Model review",
+    "d5": "Detectors",
+    "d6": "Review stamp",
+    "d7": "Dedup",
+    "d8": "Rank",
+    "d9": "Report",
+}
+_DROP_GLOSS = {
+    "not_a_sink": "the line is not the call the rule is about",
+    "bound_parameter": "the assembled text is a bound value",
+    "fixed_clause": "the inserted text is a fixed clause",
+    "fixture": "the value is a fixture, not a live credential",
+    "duplicate": "the same rule already covers a nearby line",
+}
 
+
+def render_markdown(report: FinalReport) -> str:
+    """Human report. The JSON summary stays at the end, under Record."""
+
+    metrics = report.metrics
+    review = metrics.model_review or "not run"
     lines = [
-        "# Silent Blue control-gap report",
+        "# Control gap report",
         "",
-        f"Repository: {report.repo_name}",
-        f"Profile: {report.profile}",
-        f"Schema: {report.schema_version}",
-        f"Advisories: {report.advisories}",
+        (
+            f"{report.repo_name} · {report.profile} · silentblue {report.version} · "
+            f"{report.generated_at} · schema {report.schema_version}"
+        ),
+        f"Advisories {report.advisories} · threat model {report.threat_model} · model review {review}",
         "",
-        "## Summary",
-        "",
-        report.summary,
+        "## Result",
         "",
     ]
+    lines.extend(_severity_table(report.findings))
+    lines.append("")
+    lines.extend(_category_table(report.findings))
+    lines.append("")
+    lines.append(
+        f"Scope: {metrics.files} files, {metrics.bytes} bytes, {metrics.primary_language}."
+    )
+    if metrics.model_calls:
+        lines.append(
+            "Cost: estimated "
+            f"{format_usd(metrics.estimated_cost_usd, metrics.rate_known)} USD, actual "
+            f"{format_usd(metrics.actual_cost_usd, metrics.usage_known and metrics.rate_known)} USD, "
+            f"{metrics.model_calls} model calls."
+        )
     if report.hollow:
-        lines.append(
-            "This empty result is untrusted. No source was sent for review, "
-            "and the detectors reported no gaps."
-        )
-    elif report.findings:
-        lines.append("Findings are candidates for a person to review.")
+        lines.append("This empty result is untrusted. No source was sent for review.")
+    elif not report.findings:
+        lines.append("No control gaps were reported. Review the coverage ledger before treating the repository as covered.")
+    if report.coverage is not None:
+        lines.extend(["", "## Coverage", ""])
+        lines.extend(_coverage_lines(report.coverage))
+    if report.edge_passed:
+        lines.append(f"Edge checks passed: {', '.join(report.edge_passed)}.")
+    lines.extend(["", "## Index", ""])
+    if not report.findings:
+        lines.append("None.")
     else:
-        lines.append(
-            "No control gaps were reported by the deterministic detectors. "
-            "Review the scope before treating the repository as covered."
-        )
-    metrics = report.metrics
-    lines.extend(["", "## Scan metrics", ""])
-    lines.extend(_metric_lines(metrics))
-    lines.extend(["", "## Stages", ""])
-    for name, outcome in report.stages.items():
-        lines.append(f"{name}: {outcome}")
+        lines.extend(_index_table(report.findings))
     lines.extend(["", f"## Findings ({len(report.findings)})", ""])
     if not report.findings:
         lines.append("None.")
         lines.append("")
     for index, finding in enumerate(report.findings, start=1):
         lines.extend(_finding_block(index, finding))
-    lines.extend([f"## Dropped findings ({len(report.dropped)})", ""])
-    if not report.dropped:
-        lines.append("None.")
-        lines.append("")
-    else:
-        for item in report.dropped:
-            lines.extend(
-                [
-                    f"File: {item.file}",
-                    f"Line: {item.line}",
-                    f"Rule: {item.rule_id}",
-                    f"Reason: {item.reason}",
-                    "",
-                ]
-            )
+    lines.extend(_dropped_section(report.dropped))
+    lines.extend(["", "## Appendix", "", "### Stages", ""])
+    for name, outcome in report.stages.items():
+        title = _STAGE_TITLES.get(name, name)
+        lines.append(f"{title} ({name}): {outcome}")
+    lines.extend(["", "### Record", "", report.summary, ""])
     return "\n".join(lines)
+
+
+def _coverage_lines(coverage) -> list[str]:
+    checked = sum(1 for row in coverage.rows if row.families)
+    skipped: dict[str, int] = {}
+    for row in coverage.rows:
+        if row.reason:
+            skipped[row.reason] = skipped.get(row.reason, 0) + 1
+    lines = [
+        f"Saturated: {'yes' if coverage.saturated else 'no'}",
+        f"Checked: {checked}",
+    ]
+    for reason in sorted(skipped):
+        lines.append(f"Skipped {reason}: {skipped[reason]}")
+    if coverage.unread:
+        shown = ", ".join(coverage.unread[:8])
+        lines.append(f"Unread review paths: {shown}")
+    return lines
 
 
 def _metric_lines(metrics: Metrics) -> list[str]:
@@ -360,43 +416,176 @@ def finding_fields(finding: Finding) -> list[tuple[str, str]]:
             fields.append(("Relationship", component.relationship))
     if finding.also_at:
         fields.append(("Also at", ", ".join(str(line) for line in finding.also_at)))
+    if finding.also_in:
+        fields.append(("Also in", ", ".join(finding.also_in)))
     return fields
 
 
 def finding_sections(finding: Finding) -> list[tuple[str, str]]:
-    """Headed prose. Description, evidence, and remediation are always present."""
+    """Headed prose. Every finding uses the same three headings."""
 
-    impact = "Impact" if finding.origin == "assessment" else "Description"
-    repair = "Recommendation" if finding.origin == "assessment" else "Remediation"
     sections = [
-        (impact, finding.description),
+        ("Description", finding.description),
         ("Evidence", finding.snippet),
     ]
     if finding.threat_note:
         sections.append(("Threat model", finding.threat_note))
-    sections.append((repair, finding.remediation))
+    sections.append(("Remediation", finding.remediation))
     return sections
+
+
+def finding_lines(finding: Finding, index: int) -> list[str]:
+    """The finding block printed by the report and by /finding."""
+
+    return _finding_block(index, finding)
 
 
 def _finding_block(index: int, finding: Finding) -> list[str]:
     number = finding.number or index
-    lines = [f"## Finding {number}: {finding.title}", ""]
-    lines.extend(f"{label}: {value}" for label, value in finding_fields(finding))
+    lines = [
+        f"## Finding {number}: {finding.title}",
+        "",
+        _identity(finding),
+    ]
+    cvss = _cvss_line(finding)
+    if cvss:
+        lines.append(cvss)
+    extra = _extra_line(finding)
+    if extra:
+        lines.append(extra)
     lines.append("")
     for label, text in finding_sections(finding):
         lines.append(f"{label}:")
         if label == "Evidence":
-            lines.extend(_evidence_lines(text))
+            lines.extend(_fence(finding.file, text))
         elif text:
             lines.append(text.rstrip("\n"))
         lines.append("")
     return lines
 
 
-def _evidence_lines(snippet: str) -> list[str]:
+def _identity(finding: Finding) -> str:
+    case = finding.case_id or "unassigned"
+    return f"{finding.severity} · {finding.rule_id} · {finding.file}:{finding.line} · {case}"
+
+
+def _cvss_line(finding: Finding) -> str:
+    if finding.cvss_score is None:
+        return ""
+    version = finding.cvss_version or "3.1"
+    score = format(finding.cvss_score, ".1f")
+    vector = f" {finding.cvss_vector}" if finding.cvss_vector else ""
+    return f"CVSS {version} {score}{vector}"
+
+
+def _extra_line(finding: Finding) -> str:
+    parts: list[str] = []
+    if finding.verdict:
+        parts.append(f"Verdict {finding.verdict}")
+    if finding.playbook:
+        parts.append(f"Playbook {finding.playbook}")
+    if finding.category:
+        parts.append(f"Category {finding.category}")
+    if finding.advisory_id:
+        parts.append(f"Advisory {finding.advisory_id}")
+    component = finding.component
+    if component is not None and component.purl.startswith("pkg:"):
+        parts.append(
+            f"Component {component.ecosystem} {component.name} {component.version}".strip()
+        )
+        if component.fixed_version:
+            parts.append(f"Fixed {component.fixed_version}")
+    if finding.also_at:
+        parts.append("Also at " + ", ".join(str(line) for line in finding.also_at))
+    if finding.also_in:
+        parts.append("Also in " + ", ".join(finding.also_in))
+    return " · ".join(parts)
+
+
+def _fence(path: str, snippet: str) -> list[str]:
     if not snippet:
         return []
-    return [f"    {line}" if line else "" for line in snippet.splitlines()]
+    marker = "```"
+    while marker in snippet:
+        marker += "`"
+    return [f"{marker}{path}", *snippet.splitlines(), marker]
+
+
+def _severity_table(findings: list[Finding]) -> list[str]:
+    counts = {name: 0 for name in _SEVERITIES}
+    for finding in findings:
+        counts[finding.severity] = counts.get(finding.severity, 0) + 1
+    header = "| Severity | " + " | ".join(name.capitalize() for name in _SEVERITIES) + " |"
+    rule = "| --- | " + " | ".join("---" for _ in _SEVERITIES) + " |"
+    row = "| Count | " + " | ".join(str(counts[name]) for name in _SEVERITIES) + " |"
+    return [header, rule, row]
+
+
+def _category_table(findings: list[Finding]) -> list[str]:
+    buckets: dict[str, dict[str, int]] = {}
+    for finding in findings:
+        key = finding.control_family or "unspecified"
+        bucket = buckets.setdefault(key, {name: 0 for name in (*_SEVERITIES, "confirmed", "unsettled")})
+        bucket[finding.severity] = bucket.get(finding.severity, 0) + 1
+        if finding.verdict == "inconclusive":
+            bucket["unsettled"] += 1
+        else:
+            bucket["confirmed"] += 1
+    header = (
+        "| Control category | "
+        + " | ".join(name.capitalize() for name in _SEVERITIES)
+        + " | Confirmed | Unsettled |"
+    )
+    rule = "| --- | " + " | ".join("---" for _ in (*_SEVERITIES, "c", "u")) + " |"
+    lines = [header, rule]
+    if not buckets:
+        lines.append("| None | 0 | 0 | 0 | 0 | 0 | 0 | 0 |")
+        return lines
+    for key in sorted(buckets, key=lambda item: (-sum(buckets[item][name] for name in _SEVERITIES), item)):
+        bucket = buckets[key]
+        cells = " | ".join(str(bucket[name]) for name in _SEVERITIES)
+        lines.append(
+            f"| {_category_label(key)} | {cells} | {bucket['confirmed']} | {bucket['unsettled']} |"
+        )
+    return lines
+
+
+def _index_table(findings: list[Finding]) -> list[str]:
+    lines = [
+        "| # | Severity | Rule | Location | Case |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for index, finding in enumerate(findings, start=1):
+        number = finding.number or index
+        rule = finding.advisory_id or finding.rule_id
+        lines.append(
+            f"| {number} | {finding.severity} | {rule} | {finding.file}:{finding.line} | {finding.case_id} |"
+        )
+    return lines
+
+
+def _dropped_section(dropped: list) -> list[str]:
+    lines = ["", f"## Dropped ({len(dropped)})", ""]
+    if not dropped:
+        lines.extend(["None.", ""])
+        return lines
+    reasons = sorted({item.reason for item in dropped})
+    gloss = "; ".join(f"{reason}: {_DROP_GLOSS.get(reason, reason)}" for reason in reasons)
+    lines.extend([gloss, ""])
+    grouped: dict[str, list] = {}
+    for item in dropped:
+        grouped.setdefault(item.reason, []).append(item)
+    for reason in sorted(grouped):
+        lines.append(f"### {reason}")
+        lines.append("")
+        for item in grouped[reason]:
+            lines.append(f"{item.file}:{item.line}  {item.rule_id}  {item.reason}")
+        lines.append("")
+    return lines
+
+
+def _category_label(family: str) -> str:
+    return " ".join(part.capitalize() for part in family.replace("_", "-").split("-"))
 
 
 def _present(finding: Finding, number: int) -> Finding:
@@ -417,6 +606,9 @@ def _present(finding: Finding, number: int) -> Finding:
         version="",
         purl=finding.file,
     )
+    remediation = finding.remediation
+    if APPLY_MARK not in remediation:
+        remediation = apply_note(finding.file, finding.line, remediation, origin=finding.origin)
     return finding.model_copy(
         update={
             "number": number,
@@ -424,6 +616,7 @@ def _present(finding: Finding, number: int) -> Finding:
             "cvss_vector": vector,
             "cvss_version": version,
             "component": component,
+            "remediation": remediation,
         }
     )
 
@@ -543,22 +736,23 @@ def _redact_finding(finding: Finding) -> Finding:
 
 def _html_finding(finding: Finding, index: int, escape) -> str:
     number = finding.number or index
-    facts = "".join(
-        f"<dt>{escape(label)}:</dt><dd>{escape(value)}</dd>"
-        for label, value in finding_fields(finding)
-    )
     sections: list[str] = []
     for label, text in finding_sections(finding):
         escaped = escape(text)
         if label == "Evidence":
-            block = f"<pre>{escaped}</pre>"
+            block = f"<pre><code>{escaped}</code></pre>"
         else:
             block = "<p>" + escaped.replace("\n", "<br>\n") + "</p>"
-        sections.append(f"<h3>{escape(label)}:</h3>{block}")
+        sections.append(f"<h3>{escape(label)}</h3>{block}")
+    extra = _extra_line(finding)
+    cvss = _cvss_line(finding)
+    meta = "".join(
+        f"<p class='meta'>{escape(line)}</p>" for line in (_identity(finding), cvss, extra) if line
+    )
     return (
-        '<article class="gap">'
+        f"<article class='gap {escape(finding.severity)}' id='finding-{number}'>"
         f"<h2>Finding {number}: {escape(finding.title)}</h2>"
-        f"<dl>{facts}</dl>"
+        f"{meta}"
         + "".join(sections)
         + "</article>"
     )
@@ -639,54 +833,83 @@ def render_html(report: FinalReport) -> str:
     rows = [_html_finding(finding, index, escape) for index, finding in enumerate(report.findings, start=1)]
     body = "\n".join(rows) or "<p>No control gaps were reported.</p>"
     actual_known = metrics.usage_known and metrics.rate_known
-    facts = "".join(
-        f"<dt>{escape(label)}:</dt><dd>{escape(value)}</dd>"
-        for label, value in (
-            ("Repository", report.repo_name),
-            ("Profile", report.profile),
-            ("Advisories", report.advisories),
-            ("Estimated cost USD", format_usd(metrics.estimated_cost_usd, metrics.rate_known)),
-            ("Actual cost USD", format_usd(metrics.actual_cost_usd, actual_known)),
-            ("Model calls", str(metrics.model_calls)),
-            ("Model list", f"{metrics.model_paths_read} of {metrics.model_paths} read"),
-            ("Model review", metrics.model_review or "not run"),
-            ("Price table", metrics.price_date or "none"),
+    review = metrics.model_review or "not run"
+    index_rows = []
+    for index, finding in enumerate(report.findings, start=1):
+        number = finding.number or index
+        rule = finding.advisory_id or finding.rule_id
+        index_rows.append(
+            "<tr>"
+            f"<td><a href='#finding-{number}'>{number}</a></td>"
+            f"<td>{escape(finding.severity)}</td>"
+            f"<td>{escape(rule)}</td>"
+            f"<td>{escape(finding.file)}:{finding.line}</td>"
+            f"<td>{escape(finding.case_id)}</td>"
+            "</tr>"
         )
+    index = (
+        "<table><thead><tr><th>#</th><th>Severity</th><th>Rule</th><th>Location</th><th>Case</th></tr></thead>"
+        f"<tbody>{''.join(index_rows) or '<tr><td colspan=5>None</td></tr>'}</tbody></table>"
     )
+    cost = ""
+    if metrics.model_calls:
+        cost = (
+            "<p>Cost: estimated "
+            f"{escape(format_usd(metrics.estimated_cost_usd, metrics.rate_known))} USD, actual "
+            f"{escape(format_usd(metrics.actual_cost_usd, actual_known))} USD, "
+            f"{metrics.model_calls} model calls.</p>"
+        )
+    else:
+        cost = (
+            "<p>Estimated cost USD "
+            f"{escape(format_usd(metrics.estimated_cost_usd, metrics.rate_known))}.</p>"
+        )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Silent Blue {escape(report.repo_name)}</title>
+<title>Control gap report {escape(report.repo_name)}</title>
 <style>
-body {{ font: 16px/1.45 "Segoe UI", sans-serif; margin: 2rem auto; max-width: 48rem; color: #1c1917; background: #fafaf9; }}
-h1 {{ font-size: 1.6rem; }}
-.gap {{ background: #fff; border: 1px solid #e7e5e4; padding: 1rem; margin: 1rem 0; }}
-dl {{ display: grid; grid-template-columns: 12rem 1fr; gap: 0.2rem 0.8rem; margin: 0.6rem 0 1rem; }}
-dt {{ color: #57534e; }}
-dd {{ margin: 0; }}
-h3 {{ font-size: 1rem; margin: 0.8rem 0 0.3rem; }}
+body {{ font: 15px/1.45 system-ui, sans-serif; margin: 2rem auto; max-width: 72rem; color: #1c1917; background: #fff; font-variant-numeric: tabular-nums; }}
+h1 {{ font-size: 1.5rem; font-weight: 600; }}
+table {{ border-collapse: collapse; width: 100%; margin: 0.6rem 0 1.2rem; }}
+th, td {{ text-align: left; padding: 0.25rem 0.6rem; border-bottom: 1px solid #e7e5e4; }}
+.gap {{ border: 1px solid #e7e5e4; border-left-width: 4px; padding: 1rem 1.2rem; margin: 1rem 0; }}
+.critical {{ border-left-color: #7f1d1d; }}
+.high {{ border-left-color: #9a3412; }}
+.medium {{ border-left-color: #a16207; }}
+.low, .info {{ border-left-color: #57534e; }}
+.meta {{ margin: 0.15rem 0; color: #44403c; }}
+h3 {{ font-size: 0.95rem; margin: 0.9rem 0 0.3rem; }}
 pre {{ white-space: pre-wrap; background: #f5f5f4; padding: 0.6rem; }}
+@media print {{
+  body {{ margin: 0.5in; }}
+  .gap {{ break-inside: avoid; }}
+  a {{ color: inherit; text-decoration: none; }}
+}}
 </style>
 </head>
 <body>
-<h1>Silent Blue · {escape(report.repo_name)}</h1>
-<p>{escape(report.summary)}</p>
-<dl>
-{facts}
-</dl>
+<h1>Control gap report</h1>
+<p>{escape(report.repo_name)} · {escape(report.profile)} · silentblue {escape(report.version)} · {escape(report.generated_at)} · schema {escape(report.schema_version)}</p>
+<p>Advisories {escape(report.advisories)} · threat model {escape(report.threat_model)} · model review {escape(review)}</p>
+{cost}
+<h2>Index</h2>
+{index}
 {body}
+<h2>Record</h2>
+<p>{escape(report.summary)}</p>
 </body>
 </html>
 """
 
 
 def render_pdf(report: FinalReport) -> bytes:
-    """A text PDF of the same sections, with no native library."""
+    """A text PDF of the Markdown, with a running header and a page number."""
 
     lines = _wrap(render_markdown(report).splitlines(), 90)
-    pages = [lines[index : index + 46] for index in range(0, len(lines), 46)] or [[""]]
-    return _pdf_document(pages)
+    pages = [lines[index : index + 44] for index in range(0, len(lines), 44)] or [[""]]
+    return _pdf_document(pages, report.repo_name)
 
 
 def _wrap(lines: list[str], width: int) -> list[str]:
@@ -703,7 +926,7 @@ def _wrap(lines: list[str], width: int) -> list[str]:
     return wrapped
 
 
-def _pdf_document(pages: list[list[str]]) -> bytes:
+def _pdf_document(pages: list[list[str]], repo_name: str) -> bytes:
     objects: list[bytes] = []
 
     def add(body: bytes) -> int:
@@ -713,8 +936,9 @@ def _pdf_document(pages: list[list[str]]) -> bytes:
     font = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     page_ids: list[int] = []
     content_ids: list[int] = []
-    for lines in pages:
-        content_ids.append(add(_page_stream(lines)))
+    total = len(pages)
+    for number, lines in enumerate(pages, start=1):
+        content_ids.append(add(_page_stream(lines, f"{repo_name}  {number} / {total}")))
     for content_id in content_ids:
         page_ids.append(
             add(
@@ -730,8 +954,16 @@ def _pdf_document(pages: list[list[str]]) -> bytes:
     return _serialize(objects, catalog)
 
 
-def _page_stream(lines: list[str]) -> bytes:
-    commands = ["BT", "/F1 11 Tf", "50 760 Td", "14 TL"]
+def _page_stream(lines: list[str], header: str) -> bytes:
+    commands = [
+        "BT",
+        "/F1 9 Tf",
+        "50 770 Td",
+        f"({_pdf_escape(header)}) Tj",
+        "0 -22 Td",
+        "/F1 11 Tf",
+        "14 TL",
+    ]
     for line in lines:
         commands.append(f"({_pdf_escape(line)}) Tj")
         commands.append("T*")

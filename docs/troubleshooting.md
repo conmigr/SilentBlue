@@ -72,6 +72,14 @@ A draft stays in the repository and does not reorder findings. `/model accept` r
 
 `stale` means the draft changed, or a cited file is no longer in scope. Severity order returns. Draft again, then accept again. Accepting the old draft keeps that draft and leaves new advisory rows uncited.
 
+## Directories were left out
+
+`show exclusions` lists every directory name the scan leaves out, then the ones that exist in this repository. `.claude`, `.cursor`, `.agents`, and `backups` are on that list, along with `.git`, `node_modules`, virtualenv directories, and the report directory. A file inside one of those directories is not a finding and is not sent to the model. `/exclusions` is the same command.
+
+`/skills` lists the procedures shipped with the harness. `/skill detect` prints one procedure. The session does not run the steps by itself. `/triage accept` stores an accepted risk outside the repository until the date you give. The finding stays in the report. On that date it is open again. `remediate` skips it until then.
+
+A detect report includes a coverage ledger. Saturated means every in-scope file was checked or has a skip reason. An assess review that stops early lists the unread paths and the ledger is unsaturated. A confirmed deploy checks HSTS, the content-type and frame headers, and cookie flags on the one response. A header that is present is a passed check. A missing header is a finding. That check does not prove the control stops an attack.
+
 ## The report was refused or empty
 
 An empty scope exits 2 and writes no report. `hollow` means no source was sent for review. A linked `security-scan` directory exits 2 and is not followed. The state directory, `SILENTBLUE_STATE_DIR` or `~/.silentblue/state`, must sit outside the repository. `~/.silentblue` is the home directory on Windows, macOS, and Linux.

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from silentblue.evidence import assembled_sql_verdict
 from silentblue.models import Finding
 from silentblue.redact import redact
 
@@ -15,16 +16,23 @@ _JS = frozenset({"javascript", "typescript", "tsx", "html"})
 _C = frozenset({"c", "cpp"})
 
 _SHELL_REPAIR = (
-    "Call the program with an argument list and leave shell execution disabled."
+    "Pass the program and its arguments as a list and leave the shell off: "
+    "subprocess.run([...], shell=False), execFile or spawn, exec.Command without sh -c, "
+    "or the language equivalent. Do not interpolate caller text into the command string."
 )
-_SQL_REPAIR = "Keep the SQL text constant and pass values as bound parameters."
+_SQL_REPAIR = (
+    "Make the SQL text a constant. Pass values through the driver's bind API: "
+    "PreparedStatement placeholders, database/sql arguments, sqlx bind parameters, or the equivalent. "
+    "Do not build the statement with format!, sprintf, concatenation, or an f-string."
+)
 _EVAL_REPAIR = (
-    "Remove dynamic code execution. Decode structured input with a parser and "
-    "handle an explicit set of cases."
+    "Remove eval, exec, new Function, and shell_exec of caller text. "
+    "Parse structured input with a JSON or schema parser and branch on an explicit set of keys."
 )
 _TLS_REPAIR = (
-    "Leave certificate verification enabled. Point the client at a private "
-    "trust bundle when the service uses an internal certificate authority."
+    "Delete the call that disables verification, including rejectUnauthorized: false, "
+    "InsecureSkipVerify: true, VERIFY_NONE, CURLOPT_SSL_VERIFYPEER false, and danger_accept_invalid_certs(true). "
+    "For a private CA, install that bundle as the trust store and leave hostname checks on."
 )
 
 _JS_FUNCTION = re.compile(r"(?i)\bnew\s+Function\s*\(")
@@ -137,7 +145,9 @@ def _rust(path: str, number: int, line: str) -> list[Finding]:
     if _RUST_SHELL.search(line):
         hits.append(_shell_hit(path, number, line, "format!" in line))
     if _RUST_SQL.search(line):
-        hits.append(_sql(path, number, line))
+        found = _sql(path, number, line)
+        if found is not None:
+            hits.append(found)
     if _RUST_TLS.search(line):
         hits.append(_tls(path, number, line))
     return hits
@@ -148,7 +158,9 @@ def _go(path: str, number: int, line: str) -> list[Finding]:
     if _GO_SHELL.search(line):
         hits.append(_shell_hit(path, number, line, "Sprintf" in line or "+" in line))
     if _GO_SQL.search(line):
-        hits.append(_sql(path, number, line))
+        found = _sql(path, number, line)
+        if found is not None:
+            hits.append(found)
     if _GO_TLS.search(line):
         hits.append(_tls(path, number, line))
     return hits
@@ -159,7 +171,9 @@ def _java(path: str, number: int, line: str) -> list[Finding]:
     if _JAVA_SHELL.search(line):
         hits.append(_shell_hit(path, number, line, "+" in line))
     if _JAVA_SQL.search(line):
-        hits.append(_sql(path, number, line))
+        found = _sql(path, number, line)
+        if found is not None:
+            hits.append(found)
     if _JAVA_TLS.search(line):
         hits.append(_tls(path, number, line))
     return hits
@@ -194,7 +208,9 @@ def _csharp(path: str, number: int, line: str) -> list[Finding]:
     if _CS_SHELL.search(line):
         hits.append(_shell_hit(path, number, line, "+" in line))
     if _CS_SQL.search(line):
-        hits.append(_sql(path, number, line))
+        found = _sql(path, number, line)
+        if found is not None:
+            hits.append(found)
     if _CS_TLS.search(line):
         hits.append(_tls(path, number, line))
     return hits
@@ -250,7 +266,10 @@ def _shell_hit(path: str, number: int, line: str, assembled: bool) -> Finding:
     )
 
 
-def _sql(path: str, number: int, line: str) -> Finding:
+def _sql(path: str, number: int, line: str) -> Finding | None:
+    verdict = assembled_sql_verdict(line)
+    if verdict is None:
+        return None
     return _hit(
         path,
         number,
@@ -261,7 +280,8 @@ def _sql(path: str, number: int, line: str) -> Finding:
         title="SQL built by string assembly",
         description="A query is built with interpolation or concatenation.",
         remediation=_SQL_REPAIR,
-        confidence=0.7,
+        confidence=0.7 if verdict == "detector" else 0.4,
+        verdict=verdict,
     )
 
 
@@ -292,6 +312,7 @@ def _hit(
     description: str,
     remediation: str,
     confidence: float,
+    verdict: str = "detector",
 ) -> Finding:
     snippet = redact(line.strip())
     if len(snippet) > 240:
@@ -307,4 +328,5 @@ def _hit(
         remediation=remediation,
         snippet=snippet,
         confidence=confidence,
+        verdict=verdict,  # type: ignore[arg-type]
     )

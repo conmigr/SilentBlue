@@ -6,7 +6,7 @@ import fnmatch
 import os
 from pathlib import Path
 
-from silentblue.models import ScopedFile, ScopeConfig, ScopeResult
+from silentblue.models import DirSkip, FileSkip, ScopedFile, ScopeConfig, ScopeResult
 from silentblue.paths import is_reparse_point, is_within
 
 EXT_LANG: dict[str, str] = {
@@ -48,6 +48,7 @@ EXT_LANG: dict[str, str] = {
 }
 
 _ESCAPE_CAP = 100
+_DIR_SKIP_SAMPLE = 8
 SOURCE_LANGUAGES = frozenset(
     {
         "python",
@@ -96,6 +97,11 @@ def collect_scope(
     files: list[ScopedFile] = []
     counts: dict[str, int] = {}
     escapes: list[str] = []
+    mirrors: list[str] = []
+    skip_counts: dict[str, int] = {}
+    skip_paths: dict[str, list[str]] = {}
+    mirror_names = {".claude", ".cursor", ".agents", "backups"}
+    file_skips: list[FileSkip] = []
 
     def bump(reason: str) -> None:
         counts[reason] = counts.get(reason, 0) + 1
@@ -109,7 +115,15 @@ def collect_scope(
         kept: list[str] = []
         for name in dirnames:
             path = current / name
-            if name in excluded_dirs:
+            if name in excluded_dirs or name in mirror_names:
+                relative = _relative(root, path)
+                if relative:
+                    if name in mirror_names:
+                        mirrors.append(relative)
+                    skip_counts[name] = skip_counts.get(name, 0) + 1
+                    sample = skip_paths.setdefault(name, [])
+                    if len(sample) < _DIR_SKIP_SAMPLE:
+                        sample.append(relative)
                 bump("excluded_dir")
                 continue
             if is_reparse_point(path) or not is_within(root, path):
@@ -138,9 +152,13 @@ def collect_scope(
                 size = path.stat().st_size
             except OSError:
                 bump("unreadable")
+                if relative:
+                    file_skips.append(FileSkip(path=relative, reason="unreadable"))
                 continue
             if size > max_bytes:
                 bump("too_large")
+                if relative:
+                    file_skips.append(FileSkip(path=relative, reason="too-large"))
                 continue
             language = EXT_LANG.get(path.suffix.lower(), "unknown")
             files.append(ScopedFile(path=relative, size=size, language=language))
@@ -150,6 +168,12 @@ def collect_scope(
         files=files,
         excluded_counts=dict(sorted(counts.items())),
         symlink_escapes=escapes,
+        mirror_dirs=mirrors,
+        dir_skips={
+            name: DirSkip(count=skip_counts[name], paths=sorted(skip_paths.get(name, [])))
+            for name in sorted(skip_counts)
+        },
+        file_skips=sorted(file_skips, key=lambda item: item.path),
     )
 
 

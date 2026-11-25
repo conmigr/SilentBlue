@@ -84,6 +84,7 @@ class Finding(BaseModel):
     category: str = ""
     verdict: Verdict = "detector"
     also_at: list[int] = Field(default_factory=list)
+    also_in: list[str] = Field(default_factory=list)
     threat_note: str = ""
     cvss_score: float | None = Field(default=None, ge=0, le=10)
     cvss_vector: str = ""
@@ -113,6 +114,24 @@ class ScopedFile(BaseModel):
     language: str
 
 
+class DirSkip(BaseModel):
+    """One directory name the walk left out, with a sample of the paths found."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    count: int = Field(ge=0)
+    paths: list[str] = Field(default_factory=list)
+
+
+class FileSkip(BaseModel):
+    """One file the walk left out, with the reason."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    reason: str
+
+
 class ScopeResult(BaseModel):
     """Inventory produced by the scope walk."""
 
@@ -121,6 +140,30 @@ class ScopeResult(BaseModel):
     files: list[ScopedFile]
     excluded_counts: dict[str, int] = Field(default_factory=dict)
     symlink_escapes: list[str] = Field(default_factory=list)
+    mirror_dirs: list[str] = Field(default_factory=list)
+    dir_skips: dict[str, DirSkip] = Field(default_factory=dict)
+    file_skips: list[FileSkip] = Field(default_factory=list)
+
+
+class CoverageRow(BaseModel):
+    """One file in the coverage ledger."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    language: str = ""
+    families: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class CoverageLedger(BaseModel):
+    """Detect coverage, plus review paths an assess scan left unread."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    saturated: bool = False
+    rows: list[CoverageRow] = Field(default_factory=list)
+    unread: list[str] = Field(default_factory=list)
 
 
 class ContextPackage(BaseModel):
@@ -195,6 +238,7 @@ class RunState(BaseModel):
     advisory_fingerprint: str = ""
     review_paths: list[str] = Field(default_factory=list)
     review_note: str = ""
+    cleared_keys: list[str] = Field(default_factory=list)
 
 
 class CheckpointEnvelope(BaseModel):
@@ -262,6 +306,8 @@ class FinalReport(BaseModel):
     advisory_fingerprint: str = ""
     stages: dict[str, StageOutcome]
     metrics: Metrics
+    coverage: CoverageLedger | None = None
+    edge_passed: list[str] = Field(default_factory=list)
     findings: list[Finding]
     dropped: list[DroppedFinding]
 
@@ -298,6 +344,10 @@ class ScopeConfig(BaseModel):
             "security-scan",
             "security-remediation",
             ".silentblue",
+            ".claude",
+            ".cursor",
+            ".agents",
+            "backups",
         ]
     )
     exclude_exts: list[str] = Field(

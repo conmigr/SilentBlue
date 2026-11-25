@@ -54,6 +54,16 @@ def test_findings_can_be_counted_and_filtered_by_category():
     assert interpret("show osv findings").command == "/findings osv"
 
 
+def test_show_exclusions_maps_with_a_small_typo():
+    listed = interpret("show exclusions")
+    asked = interpret("what is excluded")
+    typo = interpret("shwo exclusions")
+    assert listed.command == "/exclusions"
+    assert asked.command == "/exclusions"
+    assert typo.command == "/exclusions"
+    assert interpret("show findings").command == "/findings"
+
+
 def test_small_typos_map_to_the_same_command():
     findings = interpret("shwo findngs")
     scan = interpret("scna osv")

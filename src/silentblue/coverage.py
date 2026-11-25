@@ -96,28 +96,76 @@ _PIPED = re.compile(
 _PIPELINE = re.compile(r"pull_request_target|write-all")
 
 _INJECTION = (
-    "Keep the command, query, template, header, and path text constant. "
-    "Pass values through a parameter, an argument list, or a DOM method."
+    "Keep the query, filter, template, and header text constant. "
+    "Pass caller values as bound parameters, as separate arguments, or as text nodes. "
+    "Do not compile a caller string as a template, and do not assign request data to a response header name or value."
 )
 _ROUTE = (
-    "Call fixed URLs from configuration. Accept a redirect target only when it is "
-    "a relative path on an allow-list you control."
+    "Read outbound URLs from configuration. If a redirect must vary, accept only a relative path "
+    "that matches an allow-list in code, and reject a scheme, host, or // prefix."
 )
-_PATH_REPAIR = "Join a path under a fixed root and reject a result that escapes that root."
-_CRYPTO = "Use a password hash for passwords, and a CSPRNG for tokens and session identifiers."
-_CIPHER = "Use an authenticated cipher such as AES-GCM. Leave ECB, DES, and RC4 unused."
-_LOAD = "Decode data with a parser that does not construct objects from the stream."
-_JWT_REPAIR = "Verify the token signature and accept only an explicit algorithm list."
-_COOKIE_REPAIR = "Set HttpOnly and Secure on session cookies, and keep the token off the page."
-_CSRF_REPAIR = "Keep CSRF checks enabled on state-changing routes."
-_MASS_REPAIR = "Copy an explicit field list from the request. Leave the request body unexpanded."
-_RATE_REPAIR = "Leave a limit enabled on login, signup, password, and upload routes."
-_DEFAULT_REPAIR = "Remove the default password and load the credential from outside the source tree."
-_HEADER_REPAIR = "Leave the security headers and secure-cookie flags at their safe settings."
-_LOG_REPAIR = "Leave logging enabled for authentication and authorization failures."
-_DEP_REPAIR = "Pin the dependency to a reviewed version and fetch it over TLS."
-_PIPE_REPAIR = "Download a release, check its digest, and run it as a file. Leave the shell out of the pipe."
-_PIPELINE_REPAIR = "Run untrusted pull requests with read permissions, and name the permissions the job needs."
+_PATH_REPAIR = (
+    "Resolve the path under a fixed root with the language's path API. "
+    "Reject the result when the resolved path is not still inside that root."
+)
+_CRYPTO = (
+    "Hash passwords with a password hash such as bcrypt, scrypt, or Argon2. "
+    "Draw tokens and session identifiers from a cryptographic generator such as secrets.token_urlsafe or crypto.randomBytes. "
+    "Do not use MD5, SHA-1, random, or Math.random for those values."
+)
+_CIPHER = (
+    "Use an authenticated cipher such as AES-GCM. "
+    "Remove ECB, DES, RC4, and Blowfish. Pass a random nonce and check the authentication tag on decrypt."
+)
+_LOAD = (
+    "Decode the stream with a parser that returns data only: json.loads, yaml.safe_load, or the equivalent. "
+    "Remove pickle.loads, yaml.load without SafeLoader, and native formatters that construct objects."
+)
+_JWT_REPAIR = (
+    "Verify the signature with an explicit algorithm list such as HS256 or RS256. "
+    "Reject alg=none and any call that sets verify to false."
+)
+_COOKIE_REPAIR = (
+    "Set HttpOnly and Secure true on the session cookie. Add SameSite=Strict or Lax. "
+    "Do not set either flag false, and do not copy the token into page script."
+)
+_CSRF_REPAIR = (
+    "Turn the CSRF check back on for state-changing routes. "
+    "Require a token that is not readable by another origin, and reject a request that does not present it."
+)
+_MASS_REPAIR = (
+    "Copy a named field list from the request, for example a DTO or an allow-list passed to the model. "
+    "Do not pass the raw body to create, update, or a mass-assignment helper."
+)
+_RATE_REPAIR = (
+    "Set a non-zero limit on login, signup, password-reset, and upload routes. "
+    "Remove the exemption and any maximum of zero."
+)
+_DEFAULT_REPAIR = (
+    "Delete the well-known password from source. "
+    "Load the credential from the process environment or a secret manager, and rotate the account that used the default."
+)
+_HEADER_REPAIR = (
+    "Replace a host allow-list of * with explicit hosts. "
+    "Leave X-Content-Type-Options, frame policy, and secure-cookie flags at their safe values. "
+    "Do not set those flags false."
+)
+_LOG_REPAIR = (
+    "Leave the logger enabled. Record the event name for authentication and authorization failures. "
+    "Do not disable the handler, and do not log the credential."
+)
+_DEP_REPAIR = (
+    "Replace a range, *, or latest with an exact version, and commit the lockfile that resolves it. "
+    "Fetch over https. Delete http:// URLs and --trusted-host."
+)
+_PIPE_REPAIR = (
+    "Download the file, check its digest against a pinned value, and run that file. "
+    "Do not pipe curl, wget, or Invoke-WebRequest into sh, bash, or Invoke-Expression."
+)
+_PIPELINE_REPAIR = (
+    "Remove pull_request_target from untrusted pull requests, or check out the untrusted code without the default token. "
+    "Replace permissions: write-all with the named permissions the job uses, such as contents: read."
+)
 
 
 def extra_findings(path: str, number: int, line: str) -> list[Finding]:

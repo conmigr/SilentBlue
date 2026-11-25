@@ -42,8 +42,8 @@ PLAYBOOKS: dict[str, Playbook] = {
             "a password is a well-known default, or a credential value is passed to a log call."
         ),
         remediation=(
-            "Remove the value from source, rotate the credential, and load it from "
-            "an environment variable or a secret manager."
+            "Delete the literal, revoke it at the issuer, and read the replacement from the process "
+            "environment or a secret manager. Do not commit the new value."
         ),
     ),
     "injection": Playbook(
@@ -65,9 +65,9 @@ PLAYBOOKS: dict[str, Playbook] = {
             "is parsed as HTML."
         ),
         remediation=(
-            "Keep the command or query text constant. Pass values as bound parameters "
-            "or as separate arguments, leave shell execution disabled, and build markup "
-            "with DOM methods or a fixed template."
+            "Keep the statement, command, filter, and template text constant. "
+            "Pass values through the driver's bind API or an argument list with the shell off. "
+            "Build markup with DOM methods. Do not compile caller text as code or HTML."
         ),
     ),
     "transport": Playbook(
@@ -77,8 +77,8 @@ PLAYBOOKS: dict[str, Playbook] = {
         holds_when="Certificate verification stays at the client default, or a private trust bundle is named.",
         gap_when="A call turns certificate verification off, including rejectUnauthorized set to false.",
         remediation=(
-            "Leave certificate verification enabled. Point the client at a private "
-            "trust bundle when the service uses an internal certificate authority."
+            "Delete verify=False, rejectUnauthorized: false, and InsecureSkipVerify: true. "
+            "For a private CA, set the trust store to that bundle and leave hostname checks on."
         ),
     ),
     "configuration": Playbook(
@@ -94,8 +94,8 @@ PLAYBOOKS: dict[str, Playbook] = {
             "a security header or a secure-cookie flag."
         ),
         remediation=(
-            "Turn debug mode off, name the allowed hosts, and leave the security headers "
-            "and secure-cookie flags enabled."
+            "Set debug flags false in shared configuration. Replace a host allow-list of * with explicit hosts. "
+            "Leave security headers and secure-cookie flags at their safe values."
         ),
     ),
     "access-control": Playbook(
@@ -116,8 +116,8 @@ PLAYBOOKS: dict[str, Playbook] = {
             "the caller with the owner."
         ),
         remediation=(
-            "Name the allowed origins, keep CSRF checks on, copy an explicit field list, "
-            "and compare the caller with the owner before returning or changing an object."
+            "Name allowed origins as scheme, host, and port. Keep the CSRF check on for state-changing routes. "
+            "Copy a named field list from the body. Compare the caller with the owner before returning or changing an object."
         ),
     ),
     "cryptography": Playbook(
@@ -133,8 +133,8 @@ PLAYBOOKS: dict[str, Playbook] = {
             "source, or a call selects ECB, DES, RC4, or Blowfish."
         ),
         remediation=(
-            "Hash passwords with a password hash. Draw tokens from a cryptographic generator. "
-            "Use an authenticated cipher."
+            "Hash passwords with bcrypt, scrypt, or Argon2. Draw tokens from a cryptographic generator. "
+            "Use an authenticated cipher such as AES-GCM, and remove ECB, DES, RC4, and Blowfish."
         ),
     ),
     "deserialization": Playbook(
@@ -143,7 +143,10 @@ PLAYBOOKS: dict[str, Playbook] = {
         control="Decoders do not construct objects from a stream.",
         holds_when="Structured input is decoded with a safe parser that returns data only.",
         gap_when="A loader can construct objects, including pickle, unsafe YAML, or a native formatter.",
-        remediation="Decode data with a parser that does not construct objects from the stream.",
+        remediation=(
+            "Decode with json.loads, yaml.safe_load, or the equivalent. "
+            "Remove pickle.loads and yaml.load without SafeLoader."
+        ),
     ),
     "request-routing": Playbook(
         playbook_id="request-routing",
@@ -157,8 +160,8 @@ PLAYBOOKS: dict[str, Playbook] = {
             "An HTTP client, file path, or redirect target is taken from request data."
         ),
         remediation=(
-            "Call fixed URLs, join files under a fixed root, and accept only allow-listed "
-            "relative redirect targets."
+            "Read outbound URLs from configuration. Resolve file paths under a fixed root and reject a path that escapes it. "
+            "Accept a redirect only when it is a relative path on an allow-list, with no scheme or host."
         ),
     ),
     "authentication": Playbook(
@@ -176,8 +179,8 @@ PLAYBOOKS: dict[str, Playbook] = {
             "factor in the shown lines."
         ),
         remediation=(
-            "Verify the token, set HttpOnly and Secure, set an expiry, and require a second "
-            "factor on the login path shown in the excerpt."
+            "Verify the token with an explicit algorithm list and reject alg=none. "
+            "Set the session cookie HttpOnly and Secure. Set an expiry. Require a second factor on the password login shown in the excerpt."
         ),
     ),
     "resource-limits": Playbook(
@@ -189,7 +192,10 @@ PLAYBOOKS: dict[str, Playbook] = {
             "A limiter is disabled or set to zero, or the excerpt shows one of those handlers "
             "with no limit in the shown lines."
         ),
-        remediation="Enable a request limit on login, signup, password, and upload routes.",
+        remediation=(
+            "Set a non-zero request limit on the login, signup, password, and upload handlers. "
+            "Remove a limiter exemption and any maximum of zero."
+        ),
     ),
     "logging": Playbook(
         playbook_id="logging",
@@ -200,7 +206,10 @@ PLAYBOOKS: dict[str, Playbook] = {
             "Logging is disabled, or the excerpt shows an authentication or authorization "
             "failure discarded by an empty handler."
         ),
-        remediation="Log the event name for authentication and authorization failures. Leave the credential out.",
+        remediation=(
+            "Log a stable event name on authentication and authorization failure. "
+            "Leave the logger enabled, and leave the password, token, and authorization header out of the message."
+        ),
     ),
     "supply-chain": Playbook(
         playbook_id="supply-chain",
@@ -217,8 +226,11 @@ PLAYBOOKS: dict[str, Playbook] = {
             "pull_request_target or write-all."
         ),
         remediation=(
-            "Pin a reviewed version, fetch it over TLS, keep a CA bundle in place, check a "
-            "digest before running a download, and name the workflow permissions."
+            "Pin an exact version in the lockfile and fetch it over https. "
+            "When an advisory names a fixed version, set that version and refresh the lockfile with the tool that wrote it. "
+            "Do not guess a version the advisory does not name, and do not pin a lower version as the repair. "
+            "Point install config at a CA bundle that exists, or use the system store. "
+            "Check a digest before running a download. Name workflow permissions instead of write-all."
         ),
     ),
 }

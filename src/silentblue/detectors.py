@@ -1,17 +1,20 @@
 """Deterministic control-gap detectors.
 
 Each rule records a missing or weak control and a defensive repair note.
-Detectors read only paths the scope walk already accepted.
+Detectors read only paths the scope walk already accepted. A hit is confirmed,
+left unsettled, or closed before it becomes a finding.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
 from silentblue.coverage import extra_findings
+from silentblue.evidence import fixture_secret, live_secret, sql_clusters
 from silentblue.languages import language_findings
-from silentblue.models import DroppedFinding, Finding, ScopeResult
+from silentblue.models import DroppedFinding, Finding, ScopedFile, ScopeResult
 from silentblue.supply import offline_findings
 from silentblue.paths import is_within
 from silentblue.redact import redact
@@ -31,9 +34,6 @@ _ASSIGNED_SECRET = re.compile(
     \s*[:=]\s*
     (['\"])([^'\"]{8,})\1
     """
-)
-_SQL = re.compile(
-    r"(?is)(?:\bexecute\s*\(|\bquery\s*\(|\.query\s*\()[^)\n]*(?:f['\"]|`[^`\n]*\$\{|\+\s*|\.format\s*\(|%\s*[\(\w])"
 )
 _OS_SYSTEM = re.compile(r"(?is)\bos\.system\s*\(\s*(?:f['\"]|[^)\n]*\+)")
 _SHELL_TRUE = re.compile(r"(?i)\bshell\s*=\s*True\b")
@@ -83,39 +83,48 @@ _CONFIG_NAMES = {
 _LONG_LINE = 4000
 
 _SECRET_REMEDIATION = (
-    "Remove the value from source, rotate the credential, and load it from "
-    "an environment variable or a secret manager at runtime."
+    "Delete the literal from the tracked file and revoke it at the issuer. "
+    "Read the replacement from the process environment or a secret manager at process start. "
+    "Do not commit the new value, and do not leave the old value in git history on a pushed branch."
 )
 _SQL_REMEDIATION = (
-    "Keep the SQL text constant and pass values as bound parameters."
+    "Make the SQL statement a constant. Pass caller values only in the driver's parameter "
+    "argument, for example cursor.execute(sql, params) or the equivalent bind call. "
+    "An f-string or concatenation that builds the statement is still the statement, even when a parameter tuple is also present."
 )
 _SHELL_REMEDIATION = (
-    "Call the program with an argument list and leave shell execution disabled."
+    "Pass the program and its arguments as a list. In Python use subprocess.run([program, arg], shell=False). "
+    "In Node use execFile or spawn with an args array. Do not set shell=True, and do not interpolate caller text into the command string."
 )
 _EVAL_REMEDIATION = (
-    "Remove eval and exec. Decode structured input with a parser and handle "
-    "an explicit set of cases."
+    "Remove eval, exec, and new Function. Parse structured input with a JSON or schema parser "
+    "and branch on an explicit set of keys. Do not compile caller text as code."
 )
 _TLS_REMEDIATION = (
-    "Leave certificate verification enabled. Point the client at a private "
-    "trust bundle when the service uses an internal certificate authority."
+    "Delete the setting that turns verification off: verify=False, rejectUnauthorized: false, "
+    "InsecureSkipVerify: true, or CURLOPT_SSL_VERIFYPEER set false. "
+    "For a private certificate authority, set the client's trust store to that CA bundle file and leave hostname checks on."
 )
 _DEBUG_REMEDIATION = (
-    "Turn debug mode off for shared configuration. Keep a local-only override "
-    "outside the repository when a developer needs it."
+    "Set DEBUG, debug, and equivalent flags false in shared configuration such as settings.py, "
+    "application.yml, and appsettings.json. Keep a developer override in an untracked local file."
 )
 _CORS_REMEDIATION = (
-    "Set an explicit origin allow-list. Credentialed routes should name the "
-    "origins that are allowed to call them."
+    "Replace the wildcard origin with an explicit list of scheme, host, and port. "
+    "On a credentialed route, set Access-Control-Allow-Origin to one of those origins and "
+    "Access-Control-Allow-Credentials to true. Do not combine a credentialed response with *."
 )
 _STORAGE_REMEDIATION = (
-    "Keep the session token in an HttpOnly, Secure cookie set by the server. "
-    "Do not store it where page script can read it."
+    "Stop writing the session token to localStorage or sessionStorage. "
+    "Set it in a cookie with HttpOnly, Secure, and SameSite=Strict or Lax, from the server response."
 )
-_LOG_REMEDIATION = "Remove credential values from log calls. Log the event name only."
+_LOG_REMEDIATION = (
+    "Remove the credential variable from the log call. Log a stable event name and a non-secret identifier. "
+    "Do not pass password, token, secret, or authorization header values to the logger."
+)
 _HTML_REMEDIATION = (
-    "Build the document with DOM methods or a fixed template. Do not pass "
-    "assembled markup to an HTML parser."
+    "Stop passing assembled text to innerHTML, document.write, insertAdjacentHTML, "
+    "dangerouslySetInnerHTML, or v-html. Build the nodes with DOM APIs or a template that does not interpolate HTML."
 )
 
 
@@ -125,7 +134,8 @@ def detect(repo: Path, scope: ScopeResult) -> tuple[list[Finding], list[DroppedF
     root = repo.resolve()
     findings: list[Finding] = []
     dropped: list[DroppedFinding] = []
-    for item in scope.files:
+    canonical, copies = _canonical_files(root, scope)
+    for item in canonical:
         path = root / item.path
         if not is_within(root, path):
             dropped.append(
@@ -142,13 +152,16 @@ def detect(repo: Path, scope: ScopeResult) -> tuple[list[Finding], list[DroppedF
         if b"\0" in raw[:8192]:
             continue
         text = raw.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-        for number, line in enumerate(lines, start=1):
-            if _is_comment(line):
-                continue
-            findings.extend(_rules_for_line(item.path, number, line))
-            findings.extend(language_findings(item.path, number, line, item.language))
-    findings.extend(offline_findings(root, scope))
+        file_findings, file_dropped = _file_findings(item.path, item.language, text)
+        also_in = copies.get(item.path, [])
+        if also_in:
+            file_findings = [
+                finding.model_copy(update={"also_in": also_in}) for finding in file_findings
+            ]
+        findings.extend(file_findings)
+        dropped.extend(file_dropped)
+    narrowed = scope.model_copy(update={"files": canonical})
+    findings.extend(offline_findings(root, narrowed))
     findings.sort(key=lambda finding: (finding.file, finding.line, finding.rule_id))
     return findings, dropped
 
@@ -172,6 +185,7 @@ def deduplicate(
         for finding in group:
             if (
                 cluster
+                and finding.rule_id != "sql-unparameterized"
                 and finding.line - cluster[-1].line <= 3
                 and finding.advisory_id == cluster[-1].advisory_id
             ):
@@ -205,30 +219,8 @@ def _collapse(cluster: list[Finding], dropped: list[DroppedFinding]) -> Finding:
 
 def _rules_for_line(path: str, number: int, line: str) -> list[Finding]:
     hits: list[Finding] = []
-    long_line = len(line) > _LONG_LINE
-    secret = _secret_finding(path, number, line)
-    if secret is not None:
-        hits.append(secret)
-    if long_line:
+    if len(line) > _LONG_LINE:
         return hits
-    sql = _match_simple(
-        path,
-        number,
-        line,
-        pattern=_SQL,
-        rule_id="sql-unparameterized",
-        control_family="injection",
-        severity="high",
-        title="SQL built by string assembly",
-        description=(
-            "A database execute call builds a statement with interpolation, "
-            "concatenation, or formatting."
-        ),
-        remediation=_SQL_REMEDIATION,
-        confidence=0.7,
-    )
-    if sql is not None:
-        hits.append(sql)
     hits.extend(_shell_findings(path, number, line))
     if _EVAL.search(line) and _EXTERNAL.search(line):
         hits.append(
@@ -333,17 +325,111 @@ def _rules_for_line(path: str, number: int, line: str) -> list[Finding]:
     return hits
 
 
-def _secret_finding(path: str, number: int, line: str) -> Finding | None:
+def _file_findings(path: str, language: str, text: str) -> tuple[list[Finding], list[DroppedFinding]]:
+    findings: list[Finding] = []
+    dropped: list[DroppedFinding] = []
+    lines = text.splitlines()
+    for cluster in sql_clusters(path, text):
+        if cluster.status == "closed":
+            dropped.append(
+                DroppedFinding(
+                    rule_id="sql-unparameterized",
+                    file=path,
+                    line=cluster.line,
+                    reason=cluster.reason,
+                )
+            )
+            continue
+        source_line = lines[cluster.line - 1] if cluster.line <= len(lines) else ""
+        findings.append(
+            _make(
+                path,
+                cluster.line,
+                source_line,
+                rule_id="sql-unparameterized",
+                control_family="injection",
+                severity="high",
+                title="SQL built by string assembly",
+                description=(
+                    "A database call builds a statement with interpolation, "
+                    "concatenation, or formatting."
+                    if cluster.status == "detector"
+                    else "A database call builds a statement, and this line does not show whether the inserted value is caller-controlled."
+                ),
+                remediation=_SQL_REMEDIATION,
+                confidence=0.7 if cluster.status == "detector" else 0.4,
+                verdict=cluster.status,
+                also_at=list(cluster.also_at),
+            )
+        )
+    for number, line in enumerate(lines, start=1):
+        if _is_comment(line):
+            continue
+        secret = _secret_finding(path, number, line)
+        if isinstance(secret, DroppedFinding):
+            dropped.append(secret)
+        elif secret is not None:
+            findings.append(secret)
+        if len(line) > _LONG_LINE:
+            continue
+        findings.extend(_rules_for_line(path, number, line))
+        findings.extend(language_findings(path, number, line, language))
+    return findings, dropped
+
+
+def _canonical_files(root: Path, scope: ScopeResult) -> tuple[list[ScopedFile], dict[str, list[str]]]:
+    """Scan each distinct file once. Empty files stay separate."""
+
+    groups: dict[bytes, list[ScopedFile]] = {}
+    order: list[bytes] = []
+    for item in scope.files:
+        path = root / item.path
+        try:
+            raw = path.read_bytes() if item.size else b""
+        except OSError:
+            raw = item.path.encode("utf-8")
+        if not item.size:
+            digest = item.path.encode("utf-8")
+        else:
+            digest = hashlib.sha256(raw).digest()
+        if digest not in groups:
+            order.append(digest)
+            groups[digest] = []
+        groups[digest].append(item)
+    canonical: list[ScopedFile] = []
+    copies: dict[str, list[str]] = {}
+    for digest in order:
+        grouped = sorted(groups[digest], key=lambda item: (len(item.path), item.path))
+        canonical.append(grouped[0])
+        if item_size(grouped) and len(grouped) > 1:
+            copies[grouped[0].path] = [item.path for item in grouped[1:]]
+    return canonical, copies
+
+
+def item_size(grouped: list[ScopedFile]) -> bool:
+    return any(item.size for item in grouped)
+
+
+def _secret_finding(path: str, number: int, line: str) -> Finding | DroppedFinding | None:
+    if live_secret(line):
+        return _secret_hit(path, number, line)
     assigned = _ASSIGNED_SECRET.search(line)
-    if assigned is not None and _PLACEHOLDER.fullmatch(assigned.group(2).strip()):
-        assigned = None
-    if assigned is None and not (
-        _AWS.search(line)
-        or _PRIVATE_KEY.search(line)
-        or _GITHUB.search(line)
-        or _SLACK.search(line)
-    ):
-        return None
+    if assigned is None:
+        if not (_AWS.search(line) or _PRIVATE_KEY.search(line) or _GITHUB.search(line) or _SLACK.search(line)):
+            return None
+        return _secret_hit(path, number, line)
+    value = assigned.group(2).strip()
+    if _PLACEHOLDER.fullmatch(value) or fixture_secret(value):
+        return DroppedFinding(
+            rule_id="hardcoded-secret",
+            file=path,
+            line=number,
+            reason="fixture",
+        )
+    return _secret_hit(path, number, line)
+
+
+def _secret_hit(path: str, number: int, line: str) -> Finding:
     return _make(
         path,
         number,
@@ -359,8 +445,14 @@ def _secret_finding(path: str, number: int, line: str) -> Finding | None:
 
 
 def _shell_findings(path: str, number: int, line: str) -> list[Finding]:
+    from silentblue.evidence import caller_controlled
+
     assembled = _ASSEMBLED.search(line) is not None or "${" in line
     node_shell = _NODE_EXEC.search(line) is not None
+    literal_command = bool(re.search(r"""(?is)(?:os\.system|execSync|exec)\s*\(\s*['\"][^'\"]*['\"]\s*\)""", line))
+    if literal_command and not assembled:
+        return []
+    verdict = "detector" if caller_controlled(line) or _EXTERNAL.search(line) else "inconclusive"
     if _OS_SYSTEM.search(line) or ((_SHELL_TRUE.search(line) or node_shell) and assembled):
         return [
             _make(
@@ -374,9 +466,10 @@ def _shell_findings(path: str, number: int, line: str) -> list[Finding]:
                 description="A process call sends an assembled command through a shell.",
                 remediation=_SHELL_REMEDIATION,
                 confidence=0.75,
+                verdict=verdict,
             )
         ]
-    if _SHELL_TRUE.search(line) or node_shell:
+    if (_SHELL_TRUE.search(line) or node_shell) and not literal_command:
         return [
             _make(
                 path,
@@ -389,6 +482,7 @@ def _shell_findings(path: str, number: int, line: str) -> list[Finding]:
                 description="A process call enables the shell for its command.",
                 remediation=_SHELL_REMEDIATION,
                 confidence=0.7,
+                verdict="inconclusive",
             )
         ]
     return []
@@ -436,6 +530,8 @@ def _make(
     description: str,
     remediation: str,
     confidence: float,
+    verdict: str = "detector",
+    also_at: list[int] | None = None,
 ) -> Finding:
     snippet = redact(line.strip())
     if len(snippet) > 240:
@@ -451,6 +547,8 @@ def _make(
         remediation=remediation,
         snippet=snippet,
         confidence=confidence,
+        verdict=verdict,  # type: ignore[arg-type]
+        also_at=also_at or [],
     )
 
 
@@ -462,6 +560,9 @@ def _html_finding(path: str, number: int, line: str) -> Finding | None:
             return None
     elif _HTML_WRITE.search(line) is None or _PLAIN_HTML.search(line) is not None:
         return None
+    from silentblue.evidence import caller_controlled
+
+    verdict = "detector" if caller_controlled(line) or _EXTERNAL.search(line) else "inconclusive"
     return _make(
         path,
         number,
@@ -473,6 +574,7 @@ def _html_finding(path: str, number: int, line: str) -> Finding | None:
         description="A call parses a string as HTML instead of building the document with DOM methods.",
         remediation=_HTML_REMEDIATION,
         confidence=0.7,
+        verdict=verdict,
     )
 
 
