@@ -68,9 +68,11 @@ def test_small_typos_map_to_the_same_command():
     findings = interpret("shwo findngs")
     scan = interpret("scna osv")
     numbered = interpret("findng 12")
+    prefixed = interpret("finding rho-1")
     assert findings.action == "tool" and findings.command == "/findings"
     assert scan.action == "tool" and scan.command == "/scan osv"
     assert numbered.action == "tool" and numbered.command == "/finding 12"
+    assert prefixed.action == "tool" and prefixed.command == "/finding rho-1"
 
 
 def test_a_slash_command_stays_exact():
@@ -104,6 +106,15 @@ def test_a_router_reply_cannot_name_an_unknown_command():
     allowed = parse_router_reply('{"action":"tool","command":"/findings"}')
     assert refused.action == "refuse" and refused.reason == "tool"
     assert allowed.action == "tool" and allowed.command == "/findings"
+
+
+def test_help_topics_are_tools():
+    scan = interpret("/help scan")
+    findings = interpret("/help findings")
+    unknown = interpret("/help wipe")
+    assert scan.action == "tool" and scan.command == "/help scan"
+    assert findings.action == "tool" and findings.command == "/help findings"
+    assert unknown.action == "refuse" and unknown.reason == "tool"
 
 
 def test_an_assumption_keeps_the_operators_words():

@@ -16,6 +16,7 @@ from silentblue.config import load_config
 from silentblue.envfile import load_operator_env
 from silentblue.errors import SilentBlueError
 from silentblue.ingest import run_ingest
+from silentblue.layout import command_text
 from silentblue.redact import configure_logging, redact
 from silentblue.remediate import run_remediate
 from silentblue.cost import format_usd
@@ -45,12 +46,13 @@ def setup(
     """Check that the local environment can run a deterministic scan."""
 
     code, text = _readiness(config, state_dir)
-    typer.echo(text)
+    lines = text.splitlines()
     if code == 0:
-        typer.echo("Next: python -m silentblue estimate --repo examples/sample")
-        typer.echo("Then: python -m silentblue scan --repo examples/sample")
+        lines.append("Next: python -m silentblue estimate --repo examples/sample")
+        lines.append("Then: python -m silentblue scan --repo examples/sample")
         if "assess key: absent" in text:
-            typer.echo("For assess, copy .env.example to .env and set SILENTBLUE_API_KEY.")
+            lines.append("For assess, copy .env.example to .env and set SILENTBLUE_API_KEY.")
+    _emit(lines)
     raise typer.Exit(code=code)
 
 
@@ -62,7 +64,7 @@ def doctor(
     """Check config and the state directory. This command makes no network calls."""
 
     code, text = _readiness(config, state_dir)
-    typer.echo(text)
+    _emit(text.splitlines())
     raise typer.Exit(code=code)
 
 
@@ -79,7 +81,7 @@ def estimate(
     except SilentBlueError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=exc.exit_code) from exc
-    typer.echo(text)
+    _emit(text.splitlines())
     raise typer.Exit(code=code)
 
 
@@ -132,20 +134,19 @@ def scan(
         osv=True if osv else None,
     )
     stream = sys.stderr if result.exit_code else sys.stdout
-    typer.echo(f"silentblue {__version__}", file=stream)
-    typer.echo(result.message, file=stream)
-    typer.echo(f"findings: {result.finding_count}", file=stream)
+    lines = [
+        f"silentblue {__version__}",
+        result.message,
+        f"findings: {result.finding_count}",
+    ]
     if result.findings_path:
-        typer.echo(f"report: {result.findings_path}", file=stream)
+        lines.append(f"report: {result.findings_path}")
     if result.exit_code == 0:
-        typer.echo(
-            f"estimated_cost_usd: {format_usd(result.estimated_cost_usd, result.rate_known)}",
-            file=stream,
+        lines.append(f"estimated_cost_usd: {format_usd(result.estimated_cost_usd, result.rate_known)}")
+        lines.append(
+            f"actual_cost_usd: {format_usd(result.actual_cost_usd, result.usage_known and result.rate_known)}"
         )
-        typer.echo(
-            f"actual_cost_usd: {format_usd(result.actual_cost_usd, result.usage_known and result.rate_known)}",
-            file=stream,
-        )
+    _emit(lines, stream=stream)
     raise typer.Exit(code=result.exit_code)
 
 
@@ -171,11 +172,10 @@ def remediate(
         argv=[redact(item) for item in sys.argv],
     )
     stream = sys.stderr if result.exit_code else sys.stdout
-    typer.echo(f"silentblue {__version__}", file=stream)
-    typer.echo(result.message, file=stream)
-    typer.echo(f"cases: {result.case_count}", file=stream)
+    lines = [f"silentblue {__version__}", result.message, f"cases: {result.case_count}"]
     if result.case_dir:
-        typer.echo(f"cases directory: {result.case_dir}", file=stream)
+        lines.append(f"cases directory: {result.case_dir}")
+    _emit(lines, stream=stream)
     raise typer.Exit(code=result.exit_code)
 
 
@@ -197,11 +197,9 @@ def validate(
         argv=[redact(item) for item in sys.argv],
     )
     stream = sys.stderr if result.exit_code else sys.stdout
-    typer.echo(f"silentblue {__version__}", file=stream)
-    typer.echo(result.message, file=stream)
-    typer.echo(f"cases: {result.case_count}", file=stream)
-    for case_id, verdict in result.verdicts.items():
-        typer.echo(f"{case_id}: {verdict}", file=stream)
+    lines = [f"silentblue {__version__}", result.message, f"cases: {result.case_count}"]
+    lines.extend(f"{case_id}: {verdict}" for case_id, verdict in result.verdicts.items())
+    _emit(lines, stream=stream)
     raise typer.Exit(code=result.exit_code)
 
 
@@ -227,12 +225,15 @@ def deploy(
         argv=[redact(item) for item in sys.argv],
     )
     stream = sys.stderr if result.exit_code else sys.stdout
-    typer.echo(f"silentblue {__version__}", file=stream)
-    typer.echo(result.message, file=stream)
-    typer.echo(f"declared: {result.declared_count}", file=stream)
-    typer.echo(f"observed: {result.observed_count}", file=stream)
+    lines = [
+        f"silentblue {__version__}",
+        result.message,
+        f"declared: {result.declared_count}",
+        f"observed: {result.observed_count}",
+    ]
     if result.findings_path:
-        typer.echo(f"report: {result.findings_path}", file=stream)
+        lines.append(f"report: {result.findings_path}")
+    _emit(lines, stream=stream)
     raise typer.Exit(code=result.exit_code)
 
 
@@ -252,11 +253,10 @@ def ingest(
         argv=[redact(item) for item in sys.argv],
     )
     stream = sys.stderr if result.exit_code else sys.stdout
-    typer.echo(f"silentblue {__version__}", file=stream)
-    typer.echo(result.message, file=stream)
-    typer.echo(f"findings: {result.finding_count}", file=stream)
+    lines = [f"silentblue {__version__}", result.message, f"findings: {result.finding_count}"]
     if result.findings_path:
-        typer.echo(f"report: {result.findings_path}", file=stream)
+        lines.append(f"report: {result.findings_path}")
+    _emit(lines, stream=stream)
     raise typer.Exit(code=result.exit_code)
 
 
@@ -276,10 +276,13 @@ def batch_scan(
         argv=[redact(item) for item in sys.argv],
     )
     stream = sys.stderr if result.exit_code else sys.stdout
-    typer.echo(f"silentblue {__version__}", file=stream)
-    typer.echo(result.message, file=stream)
-    typer.echo(f"repos: {len(result.repos)}", file=stream)
-    typer.echo(f"model_calls: {result.model_calls}", file=stream)
+    lines = [
+        f"silentblue {__version__}",
+        result.message,
+        f"repos: {len(result.repos)}",
+        f"model_calls: {result.model_calls}",
+    ]
+    _emit(lines, stream=stream)
     raise typer.Exit(code=result.exit_code)
 
 
@@ -311,6 +314,14 @@ def main() -> None:
 
     configure_logging()
     app()
+
+
+def _emit(lines: list[str], stream=None) -> None:
+    if stream not in (None, sys.stdout):
+        for line in lines:
+            typer.echo(line, file=stream)
+        return
+    typer.echo(command_text(lines))
 
 
 def _readiness(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -14,9 +15,22 @@ from silentblue.config import load_config
 from silentblue.dialogue import ROUTER_SYSTEM, Decision, interpret, parse_router_reply
 from silentblue.deploy import deploy_preview, open_authorization, run_deploy
 from silentblue.errors import SilentBlueError
+from silentblue.layout import (
+    accent,
+    card,
+    done,
+    finding_view,
+    help_text,
+    prompt_for,
+    severity,
+    table,
+    waiting,
+    working,
+)
 from silentblue.ledger import SessionLedger
 from silentblue.model import ModelReply, configured_model, failure_label, route_status
 from silentblue.models import FinalReport, Finding
+from silentblue.reading import display_id, display_prefix
 from silentblue.report import finding_lines
 from silentblue.scope import collect_scope
 from silentblue.runner import (
@@ -42,49 +56,9 @@ from silentblue.threat import (
 Reader = Callable[[], str]
 Writer = Callable[[str], None]
 
-_HELP = """\
-/help                 Show this list
-/status               Repo, threat-model state, and the last scan. Also works while a scan is running
-/cost                 Cost since this session started, by scan, assess, threat model, and NLP
-/exclusions           Directories left out of the scan, and which of them are in this repository
-show exclusions       Same as /exclusions
-/skills               List the harness skills
-/skill <name>         Show one skill
-/triage               Dispositions stored outside the repository
-/triage accept <case id> <YYYY-MM-DD> <reason>
-                      Accept that case until the date. Asks yes first
-/triage assign <case id> <owner>
-                      Assign that case. Asks yes first
-/findings             Gaps from the latest report
-show findings         Same as /findings
-/findings counts      Count of gaps by control category and severity
-/findings categories  Gaps grouped by control category
-/findings osv         Only the OSV rows from the latest report
-show osv findings     Same as /findings osv
-show supply chain findings
-                      Only that control category. The same form works for the others
-/finding <number>     One gap, with the same labels as the report. A case id also works
-/report               Paths of the written reports
-show report           Same as /report
-/model                Show the threat model
-show model            Same as /model
-/model draft          Draft a threat model from the current findings
-/model draft assess   Draft after reading source. Prints the estimate and waits
-/model assume <text>  Add an assumption outside the repository
-/model accept         Record acceptance of the current draft outside the repository
-/scan                 Run a detect scan
-/scan assess          Run an assess scan. Prints the estimate and waits
-/scan osv             Run a detect scan, then query OSV. Prints the package count and waits
-/scan assess osv      Run an assess scan, then query OSV. Prints the estimate and waits
-/scan resume          Continue an assess scan from the last finished unit
-/deploy               Review deployment files. Set SILENTBLUE_DEPLOY_URL first for the live request
-/quit                 Leave the session. A running scan stops after units already started
 
-A sentence works in place of a command. Small typos still map to the same tool.
-Ask what model am I using, why the CA bundle is missing, or why OSV did not run.
-The model question names the provider, model, and endpoint. It does not call the model.
-A request to drop a finding or change the mission is refused.
-"""
+def _terminal_human() -> bool:
+    return bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 
 class Session:
@@ -100,12 +74,14 @@ class Session:
         writer: Writer | None = None,
         client=None,
         router: bool = False,
+        human: bool | None = None,
     ) -> None:
+        self.human = reader is None and writer is None and _terminal_human() if human is None else human
         self.repo = repo
         self.state_dir = state_dir
         self.manifest_dir = manifest_dir
         self._echo_prompt = reader is not None or writer is not None
-        self.reader = reader or (_read_prompt if writer is None else input)
+        self.reader = reader or (self._input if writer is None else input)
         self.writer = writer or _console_writer
         self.client = client
         self.ledger = SessionLedger()
@@ -118,6 +94,7 @@ class Session:
         self.findings_path: Path | None = None
         self.resolved_state: Path | None = None
         self._stop = threading.Event()
+        self._live_open = False
         self._thread: threading.Thread | None = None
         self._progress_lock = threading.Lock()
         self._progress = {
@@ -145,14 +122,17 @@ class Session:
         try:
             self.resolved_state = resolve_state_dir(self.state_dir, self.repo.expanduser().resolve())
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return exc.exit_code
         self._scan("detect", retain_advisories=True)
-        self.writer("")
-        self.writer("Type /help")
+        if not self.human:
+            self.writer("")
+            self.writer("Type /help")
         while True:
+            if self.human:
+                self.writer("")
             if self._echo_prompt:
-                self.writer("silentblue>")
+                self.writer(prompt_for(bool(self.pending)).rstrip())
             try:
                 line = self.reader()
             except (EOFError, StopIteration):
@@ -169,6 +149,8 @@ class Session:
     def _turn(self, line: str) -> bool:
         decision = interpret(line)
         if decision.action == "none":
+            if self.human and self.router:
+                self.writer(working("Matching that sentence"))
             decision = self._route(line)
         if decision.action == "refuse":
             self.writer(f"refuse  {decision.reason}")
@@ -186,17 +168,17 @@ class Session:
             return True
         if decision.confirm and decision.command == "/model accept":
             self.pending = "model-accept"
-            self.writer("Accept the current threat model? yes/no")
+            self._ask("Accept the current threat model? yes/no")
             return False
         if decision.confirm and decision.command.startswith("/triage "):
             self.pending = "triage"
             self._pending_text = decision.command
-            self.writer("Record that disposition? yes/no")
+            self._ask("Record that disposition? yes/no")
             return False
         if decision.confirm and decision.command.startswith("/model assume "):
             self.pending = "model-assume"
             self._pending_text = decision.command.split(None, 2)[2]
-            self.writer("Add that assumption? yes/no")
+            self._ask("Add that assumption? yes/no")
             return False
         self._dispatch(decision.command)
         return False
@@ -236,8 +218,9 @@ class Session:
         )
 
     def _dispatch(self, command: str) -> None:
-        if command == "/help":
-            self.writer(_HELP.rstrip())
+        if command == "/help" or command.startswith("/help "):
+            topic = "" if command == "/help" else command.split(None, 1)[1]
+            self.writer(help_text(topic) or "Type /help")
             return
         if command == "/status":
             self._status()
@@ -310,7 +293,7 @@ class Session:
         if command == "/scan assess":
             self.pending = "scan-assess"
             self._print_estimate("assess")
-            self.writer("Continue? yes/no")
+            self._ask("Continue? yes/no")
             return
         if command == "/scan osv":
             self._ask_osv("scan-osv", assess=False)
@@ -321,14 +304,14 @@ class Session:
         if command == "/scan resume":
             self.pending = "scan-resume"
             self._print_estimate("assess")
-            self.writer("Continue? yes/no")
+            self._ask("Continue? yes/no")
             return
         if command == "/deploy":
             self.pending = "deploy"
             url = os.environ.get("SILENTBLUE_DEPLOY_URL", "").strip()
             snapshot = os.environ.get("SILENTBLUE_DEPLOY_SNAPSHOT", "").strip()
             self.writer(deploy_preview(self.repo, url=url, snapshot=snapshot))
-            self.writer("Continue? yes/no")
+            self._ask("Continue? yes/no")
             return
         self.writer("Type /help")
 
@@ -372,9 +355,11 @@ class Session:
         if self._busy():
             self.writer("A scan is already running. Type /status.")
             return
-        if self._echo_prompt:
+        if self._echo_prompt or (self.human and profile != "assess"):
             self._scan(profile, resume=resume, osv=osv)
             return
+        if self.human:
+            self.writer(working("Model review. Type /status. The prompt is ready."))
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._scan,
@@ -408,12 +393,21 @@ class Session:
                 files_queued=0,
                 model_calls=0,
             )
-        self.writer(profile)
+        if self.human:
+            label = "Model review" if profile == "assess" else "Detect scan"
+            self._live(working(label))
+        else:
+            self.writer(profile)
 
         def on_status(message: str) -> None:
             shown = _stage_line(message, profile)
-            if shown is not None:
-                self.writer(shown)
+            if shown is None:
+                return
+            if self.human:
+                detail = shown.strip()
+                self._live(working(f"{label}  {detail}"))
+                return
+            self.writer(shown)
 
         def on_progress(update: dict) -> None:
             with self._progress_lock:
@@ -445,6 +439,7 @@ class Session:
         finally:
             with self._progress_lock:
                 self._progress["running"] = False
+            self._live_end()
         self.ledger.note_scan("assess" if profile == "assess" else "scan")
         self.writer(result.message)
         if result.findings_path:
@@ -453,6 +448,51 @@ class Session:
             self._load_report()
         if result.exit_code:
             self.writer(f"exit: {result.exit_code}")
+        if self.human:
+            self._finish(done(self._scan_summary()))
+
+    def _error(self, exc: BaseException) -> None:
+        self.writer(f"error: {exc}")
+        if self.human:
+            self.writer("Next  /status")
+
+    def _live(self, text: str) -> None:
+        if self.human and sys.stdout.isatty():
+            sys.stdout.write("\r\033[K" + paint(text))
+            sys.stdout.flush()
+            self._live_open = True
+            return
+        self.writer(text)
+
+    def _live_end(self) -> None:
+        if self._live_open:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            self._live_open = False
+
+    def _finish(self, line: str) -> None:
+        background = threading.current_thread() is not threading.main_thread()
+        if self.human and sys.stdout.isatty() and background:
+            sys.stdout.write("\n" + paint(line) + "\n\n" + paint(prompt_for(bool(self.pending))))
+            sys.stdout.flush()
+            return
+        self.writer(line)
+
+    def _scan_summary(self) -> str:
+        if self.report is None:
+            return "Scan finished"
+        count = len(self.report.findings)
+        noun = "finding" if count == 1 else "findings"
+        buckets: dict[str, int] = {}
+        for finding in self.report.findings:
+            buckets[finding.severity] = buckets.get(finding.severity, 0) + 1
+        bits = [
+            f"{name} {buckets[name]}"
+            for name in ("critical", "high", "medium", "low", "info")
+            if buckets.get(name)
+        ]
+        tail = "  ".join(bits)
+        return f"{count} {noun}" + (f"  {tail}" if tail else "")
 
     def _deploy(self) -> None:
         from urllib.parse import urlsplit
@@ -464,7 +504,7 @@ class Session:
             try:
                 authorization = open_authorization(self.resolved_state, self.repo, host)
             except SilentBlueError as exc:
-                self.writer(f"error: {exc}")
+                self._error(exc)
                 return
         result = run_deploy(
             repo=self.repo,
@@ -496,7 +536,11 @@ class Session:
         if self.report is None or not self.report.findings:
             self.writer("No findings in the latest report.")
             return
-        for index, finding in enumerate(self.report.findings, start=1):
+        rows = list(enumerate(self.report.findings, start=1))
+        if self.human:
+            self._show_table("Findings", rows)
+            return
+        for index, finding in rows:
             self.writer(f"{index}  {finding.rule_id}  {finding.file}:{finding.line}")
             if finding.threat_note:
                 self.writer(f"   {finding.threat_note}")
@@ -594,6 +638,26 @@ class Session:
             return None
         return list(enumerate(self.report.findings, start=1))
 
+    def _show_table(self, title: str, rows: list[tuple[int, Finding]]) -> None:
+        repo = self.report.repo_name if self.report is not None else ""
+        body = []
+        for index, finding in rows:
+            shown = display_id(repo, finding.number or index)
+            body.append([
+                accent(shown),
+                severity(finding.severity),
+                finding.rule_id,
+                f"{finding.file}:{finding.line}",
+            ])
+        self.writer(f"{title}  {len(rows)}")
+        self.writer("")
+        for line in table(["#", "Severity", "Rule", "Location"], body):
+            self.writer(line)
+        self.writer("")
+        first = display_id(repo, rows[0][1].number or rows[0][0])
+        noun = "finding" if len(rows) == 1 else "findings"
+        self.writer(f"{len(rows)} {noun}.  /finding {first} opens the first.")
+
     def _write_rows(self, rows: list[tuple[int, Finding]]) -> None:
         for index, finding in rows:
             name = finding.advisory_id or finding.rule_id
@@ -601,7 +665,8 @@ class Session:
             if finding.component is not None and finding.component.purl.startswith("pkg:"):
                 component = finding.component
                 package = f"  {component.ecosystem} {component.name} {component.version}".rstrip()
-            self.writer(f"{index}  {name}{package}  {finding.file}:{finding.line}")
+            shown = display_id(self.report.repo_name, finding.number or index) if self.report is not None else str(index)
+            self.writer(f"{shown}  {name}{package}  {finding.file}:{finding.line}")
             if finding.threat_note:
                 self.writer(f"   {finding.threat_note}")
 
@@ -612,7 +677,12 @@ class Session:
             self.writer("No finding with that number or case id.")
             return
         index, finding = match
-        for line in finding_lines(finding, index):
+        repo_name = self.report.repo_name if self.report is not None else ""
+        if self.human:
+            for line in finding_view(repo_name, finding.number or index, finding):
+                self.writer(line)
+            return
+        for line in finding_lines(finding, index, repo_name):
             self.writer(line)
 
     def _report(self) -> None:
@@ -653,6 +723,19 @@ class Session:
         self.writer(f"repo  {root}")
         self.writer(f"findings  {gaps}")
         advisories = "off" if self.report is None else self.report.advisories
+        if self.human:
+            rows = [
+                ("Repo", str(root)),
+                ("Findings", str(gaps)),
+                ("Advisories", advisories),
+                ("Threat model", status),
+                ("Next", _next_step(status)),
+            ]
+            for line in card("Status", rows, self._route_lines()):
+                self.writer(line)
+            self.writer("")
+            self.writer(done(f"threat model  {status}"))
+            return
         self.writer(f"advisories  {advisories}")
         self.writer(f"threat model  {status}")
         self.writer(f"next  {_next_step(status)}")
@@ -720,7 +803,7 @@ class Session:
         try:
             skills = catalog()
         except ValueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         for skill in skills:
             self.writer(f"{skill.name}  {skill.description}")
@@ -772,7 +855,7 @@ class Session:
                 )
             record_entry(self.resolved_state, self.repo, entry)
         except (ValueError, SilentBlueError) as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         self.writer(f"Recorded  {entry.disposition}  {entry.case_id}")
 
@@ -782,7 +865,7 @@ class Session:
             config = load_config(None, Path.cwd(), root)
             scope = collect_scope(root, config.scope, extra_exclude_dirs={config.output.dirname})
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         names: list[str] = []
         for name in [*config.scope.exclude_dirs, config.output.dirname, *sorted(scope.dir_skips)]:
@@ -846,7 +929,7 @@ class Session:
         try:
             path = save_model(self.repo, model)
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         self.writer(f"Draft written  {path}")
         self.writer(render_text(model, "draft"))
@@ -857,7 +940,7 @@ class Session:
             config = _prepare_model(load_config(None, Path.cwd(), root, "assess"))
             client = self.client or _model_client(config, None)
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return model
         if client is None:
             self.writer("error: assess profile requires SILENTBLUE_API_KEY")
@@ -883,7 +966,7 @@ class Session:
             )
         except SilentBlueError as exc:
             self.ledger.add("threat-model", None, provider, name, failure_label(exc))
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return model
         text = reply.text if isinstance(reply, ModelReply) else str(reply)
         provider, name = _model_identity(client)
@@ -906,21 +989,30 @@ class Session:
         try:
             self.writer(preview_advisories(self.repo))
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         self.pending = pending
-        self.writer("Continue? yes/no")
+        self._ask("Continue? yes/no")
 
     def _ask_assess_draft(self) -> None:
         self.pending = "model-assess"
         self._print_estimate("assess")
-        self.writer("Continue? yes/no")
+        self._ask("Continue? yes/no")
+
+    def _ask(self, question: str) -> None:
+        if self.human:
+            self.writer(waiting(question))
+        else:
+            self.writer(question)
+
+    def _input(self) -> str:
+        return input(paint(prompt_for(bool(self.pending))))
 
     def _print_estimate(self, profile: str) -> None:
         try:
             _code, text = estimate_repo(repo=self.repo, cwd=Path.cwd(), profile=profile)
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         self.writer(text)
 
@@ -937,7 +1029,7 @@ class Session:
         try:
             save_model(self.repo, updated)
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         self.writer("Assumption added. Accept the draft again if it was already accepted.")
 
@@ -949,7 +1041,7 @@ class Session:
         try:
             digest = accept_model(self.repo, self.resolved_state, model)
         except SilentBlueError as exc:
-            self.writer(f"error: {exc}")
+            self._error(exc)
             return
         self.writer(render_text(model, "accepted"))
         self.writer(f"Accepted hash  {digest}")
@@ -1035,6 +1127,7 @@ def run_session(
     writer: Writer | None = None,
     client=None,
     router: bool = False,
+    human: bool | None = None,
 ) -> int:
     """Open a session. The reader and writer default to the terminal."""
 
@@ -1046,6 +1139,7 @@ def run_session(
         writer=writer,
         client=client,
         router=router,
+        human=human,
     ).run()
 
 
@@ -1104,6 +1198,14 @@ def _match(report: FinalReport | None, token: str) -> tuple[int, Finding] | None
         return None
     if token.isdigit():
         index = int(token)
+        if 1 <= index <= len(report.findings):
+            return index, report.findings[index - 1]
+        return None
+    prefix = display_prefix(report.repo_name)
+    lowered = token.lower()
+    marker = f"{prefix}-"
+    if lowered.startswith(marker) and lowered[len(marker) :].isdigit():
+        index = int(lowered[len(marker) :])
         if 1 <= index <= len(report.findings):
             return index, report.findings[index - 1]
         return None

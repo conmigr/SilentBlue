@@ -234,9 +234,9 @@ def test_osv_fills_cvss_and_a_failed_query_exits_1(workspace, monkeypatch):
     assert first["component"]["fixed_version"] == "2.32.4"
     assert first["component"]["relationship"] == "direct"
     markdown = next((repo / "security-scan").glob("*_report.md")).read_text(encoding="utf-8")
-    assert f"CVSS 3.1 9.8 {_VECTOR}" in markdown
-    assert "Component PyPI requests 2.32.3" in markdown
-    assert "Fixed 2.32.4" in markdown
+    assert f"3.1 9.8 {_VECTOR}" in markdown
+    assert "The component is PyPI requests 2.32.3." in markdown
+    assert "The fixed version is 2.32.4." in markdown
     assert "requests==2.32.4" in first["remediation"]
     assert "python -m pip install -r requirements.txt" in first["remediation"]
     assert "Do not add a proof-of-concept" in first["remediation"]

@@ -109,15 +109,16 @@ def test_full_scan_reports_agree_and_redact(workspace):
         assert item["cvss_vector"].startswith("CVSS:3.1/")
         assert item["cvss_score"] is not None
         assert item["component"]["name"] == item["file"]
-    assert "\n## Finding 1:" in markdown
-    assert "CVSS 3.1 " in markdown
+    assert "\n## rep-1" in markdown
+    assert "**CVSS:**" in markdown
     assert "CVSS:3.1/" in markdown
-    assert "\nDescription:" in markdown
-    assert "\nEvidence:" in markdown
-    assert "\nRemediation:" in markdown
+    assert "**Description:**" in markdown
+    assert "**Evidence:**" in markdown
+    assert "**Remediation:**" in markdown
+    assert "**Why it matters:**" in markdown
+    assert "**Impact:**" in markdown
     assert "Apply this in " in markdown
     assert "Do not add a proof-of-concept" in markdown
-    assert "**CVSS:**" not in markdown
     assert list((workspace["repo"] / "security-scan").glob("*_report.yaml")) == []
     ids = [item["case_id"] for item in reported]
     assert len(ids) == len(set(ids))
@@ -128,7 +129,7 @@ def test_full_scan_reports_agree_and_redact(workspace):
         item["partialFingerprints"]["sbFindingId/v1"] for item in sarif["runs"][0]["results"]
     ]
     assert sarif_ids == ids
-    assert markdown.count("\n## Finding ") == len(reported)
+    assert markdown.count("\n## rep-") == len(reported)
 
     for item in reported:
         assert item["control_family"]
