@@ -32,6 +32,7 @@ from silentblue.playbooks import playbook_for
 from silentblue.policy import review_patch
 from silentblue.redact import configure_logging, redact
 from silentblue.runner import _model_client, _prepare_model, _require_repo
+from silentblue.triage import accepted_case_ids
 from silentblue.runtime import StageContext
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 _SYSTEM = (
     "You are a defensive security engineer for Silent Blue. "
     "Propose a minimal source change that puts the missing control in place. "
+    "The replacement is the repaired source for those lines. "
+    "Do not include a proof of concept, a payload, or a comment that shows how to trigger the flaw. "
     "Edit only the file you were shown. "
     "Keep tests in place. "
     "Keep security controls enabled. "
@@ -92,7 +95,12 @@ def run_remediate(
         report = load_report(report_path)
         ctx = StageContext(config, active)
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        cases = [_draft_case(root, ctx, finding, selected, stamp) for finding in report.findings if finding.verdict in _ELIGIBLE]
+        held = _accepted(root)
+        cases = [
+            _draft_case(root, ctx, finding, selected, stamp)
+            for finding in report.findings
+            if finding.verdict in _ELIGIBLE and finding.case_id not in held
+        ]
         cases = resolve_overlaps(cases)
         if selected == "fix":
             cases = apply_fixes(root, cases)
@@ -292,6 +300,18 @@ def _draft_case(
         current=redact(original)[:2000],
         replacement=review.replacement if review.ok else redact(review.replacement)[:_MAX_STORED],
     )
+
+
+def _accepted(repo: Path) -> set[str]:
+    raw = os.environ.get("SILENTBLUE_STATE_DIR", "")
+    directory = Path(raw) if raw else Path.home() / ".silentblue" / "state"
+    try:
+        resolved = directory.expanduser().resolve()
+    except OSError:
+        return set()
+    if not resolved.is_dir() or is_within(repo, resolved):
+        return set()
+    return accepted_case_ids(resolved, repo)
 
 
 def _window(lines: list[str], line: int, max_bytes: int) -> str:

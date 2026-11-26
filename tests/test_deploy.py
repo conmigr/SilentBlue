@@ -144,13 +144,51 @@ def test_named_url_is_requested_once(workspace):
     assert "deploy-cookie-flags" in _rules(workspace)
 
 
+def test_missing_security_headers_are_observed_and_present_headers_pass():
+    from silentblue.deploy import _header_checks
+
+    missing, passed = _header_checks("https://app.example", [("Content-Type", "text/html")])
+    assert {item.rule_id for item in missing} == {
+        "deploy-hsts-missing",
+        "deploy-content-type-options",
+        "deploy-frame-options",
+    }
+    assert passed == []
+    present, ok = _header_checks(
+        "https://app.example",
+        [
+            ("Strict-Transport-Security", "max-age=60"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("X-Frame-Options", "DENY"),
+        ],
+    )
+    assert present == []
+    assert ok == ["hsts", "content-type-options", "frame-options"]
+
+
+def test_a_closed_authorization_does_not_match():
+    from datetime import datetime, timezone
+
+    from silentblue.deploy import DeployAuthorization, authorization_allows
+
+    record = DeployAuthorization(
+        host="app.example",
+        confirmed_at="2020-01-01T00:00:00Z",
+        expires_at="2020-01-01T00:10:00Z",
+    )
+    now = datetime(2026, 11, 25, tzinfo=timezone.utc)
+    assert authorization_allows(record, "app.example", now) is False
+    assert authorization_allows(record, "other.example", datetime(2020, 1, 1, tzinfo=timezone.utc)) is False
+
+
 def test_untrusted_certificate_is_a_candidate():
-    found = _url_findings(
+    found, passed = _url_findings(
         "https://app.example",
         UrlObservation(error="untrusted", final_scheme="https"),
         [],
     )
     assert found[0].rule_id == "deploy-certificate-untrusted"
+    assert passed == []
 
 
 def test_a_linked_directory_does_not_contribute(workspace, tmp_path):

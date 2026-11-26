@@ -12,12 +12,13 @@ from pathlib import Path
 from silentblue import __version__
 from silentblue.config import load_config
 from silentblue.dialogue import ROUTER_SYSTEM, Decision, interpret, parse_router_reply
-from silentblue.deploy import deploy_preview, run_deploy
+from silentblue.deploy import deploy_preview, open_authorization, run_deploy
 from silentblue.errors import SilentBlueError
 from silentblue.ledger import SessionLedger
 from silentblue.model import ModelReply, configured_model, failure_label, route_status
 from silentblue.models import FinalReport, Finding
-from silentblue.report import finding_fields, finding_sections
+from silentblue.report import finding_lines
+from silentblue.scope import collect_scope
 from silentblue.runner import (
     _model_client,
     _prepare_model,
@@ -25,7 +26,9 @@ from silentblue.runner import (
     resolve_state_dir,
     run_scan,
 )
+from silentblue.skillload import catalog, get_skill
 from silentblue.style import paint
+from silentblue.triage import TriageEntry, load_entries, record_entry
 from silentblue.threat import (
     accept_model,
     draft_from_findings,
@@ -43,6 +46,15 @@ _HELP = """\
 /help                 Show this list
 /status               Repo, threat-model state, and the last scan. Also works while a scan is running
 /cost                 Cost since this session started, by scan, assess, threat model, and NLP
+/exclusions           Directories left out of the scan, and which of them are in this repository
+show exclusions       Same as /exclusions
+/skills               List the harness skills
+/skill <name>         Show one skill
+/triage               Dispositions stored outside the repository
+/triage accept <case id> <YYYY-MM-DD> <reason>
+                      Accept that case until the date. Asks yes first
+/triage assign <case id> <owner>
+                      Assign that case. Asks yes first
 /findings             Gaps from the latest report
 show findings         Same as /findings
 /findings counts      Count of gaps by control category and severity
@@ -176,6 +188,11 @@ class Session:
             self.pending = "model-accept"
             self.writer("Accept the current threat model? yes/no")
             return False
+        if decision.confirm and decision.command.startswith("/triage "):
+            self.pending = "triage"
+            self._pending_text = decision.command
+            self.writer("Record that disposition? yes/no")
+            return False
         if decision.confirm and decision.command.startswith("/model assume "):
             self.pending = "model-assume"
             self._pending_text = decision.command.split(None, 2)[2]
@@ -227,6 +244,18 @@ class Session:
             return
         if command == "/cost":
             self._cost()
+            return
+        if command == "/exclusions":
+            self._exclusions()
+            return
+        if command == "/skills":
+            self._skills()
+            return
+        if command.startswith("/skill "):
+            self._skill(command.split(None, 1)[1].strip())
+            return
+        if command == "/triage":
+            self._triage_list()
             return
         if command == "/findings osv":
             self._findings_osv()
@@ -330,6 +359,9 @@ class Session:
         if pending == "model-assume":
             self._assume(self._pending_text)
             return
+        if pending == "triage":
+            self._triage_write(self._pending_text)
+            return
         if pending == "deploy":
             self._deploy()
 
@@ -423,10 +455,22 @@ class Session:
             self.writer(f"exit: {result.exit_code}")
 
     def _deploy(self) -> None:
+        from urllib.parse import urlsplit
+
+        url = os.environ.get("SILENTBLUE_DEPLOY_URL", "").strip()
+        authorization = None
+        if url and self.resolved_state is not None:
+            host = urlsplit(url).hostname or ""
+            try:
+                authorization = open_authorization(self.resolved_state, self.repo, host)
+            except SilentBlueError as exc:
+                self.writer(f"error: {exc}")
+                return
         result = run_deploy(
             repo=self.repo,
             manifest_dir=self.manifest_dir,
             cwd=Path.cwd(),
+            authorization=authorization,
         )
         self.writer(result.message)
         if result.findings_path:
@@ -491,19 +535,21 @@ class Session:
         buckets: dict[str, dict[str, int]] = {}
         for _index, finding in rows:
             key = _category_key(finding)
-            bucket = buckets.setdefault(key, {name: 0 for name in _SEVERITIES})
+            bucket = buckets.setdefault(key, {name: 0 for name in (*_SEVERITIES, *_OUTCOMES)})
             if finding.severity in bucket:
                 bucket[finding.severity] += 1
+            outcome = "unsettled" if finding.verdict == "inconclusive" else "confirmed"
+            bucket[outcome] += 1
         ordered = sorted(buckets, key=lambda key: (-sum(buckets[key].values()), _category_label(key)))
         width = max(len("Control category"), len("Total"), *(len(_category_label(key)) for key in ordered))
         self.writer(_count_line("Control category", {name: name for name in _SEVERITIES}, "Total", width, header=True))
-        totals = {name: 0 for name in _SEVERITIES}
+        totals = {name: 0 for name in (*_SEVERITIES, *_OUTCOMES)}
         for key in ordered:
             bucket = buckets[key]
-            for name in _SEVERITIES:
+            for name in totals:
                 totals[name] += bucket[name]
-            self.writer(_count_line(_category_label(key), bucket, str(sum(bucket.values())), width))
-        self.writer(_count_line("Total", totals, str(sum(totals.values())), width))
+            self.writer(_count_line(_category_label(key), bucket, str(sum(bucket[name] for name in _SEVERITIES)), width))
+        self.writer(_count_line("Total", totals, str(sum(totals[name] for name in _SEVERITIES)), width))
 
     def _findings_categories(self) -> None:
         rows = self._finding_rows()
@@ -566,14 +612,8 @@ class Session:
             self.writer("No finding with that number or case id.")
             return
         index, finding = match
-        number = finding.number or index
-        self.writer(f"Finding {number}: {finding.title}")
-        for label, value in finding_fields(finding):
-            self.writer(f"{label}: {value}")
-        for label, text in finding_sections(finding):
-            self.writer(f"{label}:")
-            if text:
-                self.writer(text)
+        for line in finding_lines(finding, index):
+            self.writer(line)
 
     def _report(self) -> None:
         if self.findings_path is None:
@@ -675,6 +715,115 @@ class Session:
             self.writer("A scan is running. Totals include calls finished so far.")
         for line in self.ledger.render():
             self.writer(line)
+
+    def _skills(self) -> None:
+        try:
+            skills = catalog()
+        except ValueError as exc:
+            self.writer(f"error: {exc}")
+            return
+        for skill in skills:
+            self.writer(f"{skill.name}  {skill.description}")
+
+    def _skill(self, name: str) -> None:
+        skill = get_skill(name)
+        if skill is None:
+            self.writer(f"No skill named {name}.")
+            return
+        self.writer(skill.body)
+
+    def _triage_list(self) -> None:
+        from silentblue.triage import active_disposition
+
+        if self.resolved_state is None:
+            self.writer("No state directory.")
+            return
+        entries = load_entries(self.resolved_state, self.repo)
+        if not entries:
+            self.writer("No dispositions recorded.")
+            return
+        for entry in entries:
+            self.writer(
+                f"{entry.case_id}  {active_disposition(entry)}  {entry.owner}  {entry.expires}".rstrip()
+            )
+
+    def _triage_write(self, command: str) -> None:
+        if self.resolved_state is None:
+            self.writer("No state directory.")
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            if command.startswith("/triage accept "):
+                _triage, _accept, case_id, day, reason = command.split(None, 4)
+                entry = TriageEntry(
+                    case_id=case_id,
+                    disposition="accepted",
+                    reason=reason,
+                    expires=day,
+                    recorded_at=stamp,
+                )
+            else:
+                _triage, _assign, case_id, owner = command.split(None, 3)
+                entry = TriageEntry(
+                    case_id=case_id,
+                    disposition="assigned",
+                    owner=owner,
+                    recorded_at=stamp,
+                )
+            record_entry(self.resolved_state, self.repo, entry)
+        except (ValueError, SilentBlueError) as exc:
+            self.writer(f"error: {exc}")
+            return
+        self.writer(f"Recorded  {entry.disposition}  {entry.case_id}")
+
+    def _exclusions(self) -> None:
+        try:
+            root = self.repo.expanduser().resolve()
+            config = load_config(None, Path.cwd(), root)
+            scope = collect_scope(root, config.scope, extra_exclude_dirs={config.output.dirname})
+        except SilentBlueError as exc:
+            self.writer(f"error: {exc}")
+            return
+        names: list[str] = []
+        for name in [*config.scope.exclude_dirs, config.output.dirname, *sorted(scope.dir_skips)]:
+            if name not in names:
+                names.append(name)
+        self.writer("Directories left out of the scan")
+        for name in names:
+            self.writer(f"  {name}")
+        self.writer("Present in this repository")
+        present = [name for name in names if scope.dir_skips.get(name) and scope.dir_skips[name].count]
+        if not present:
+            self.writer("  none")
+        for name in present:
+            skip = scope.dir_skips[name]
+            if skip.count == 1 and skip.paths:
+                self.writer(f"  {skip.paths[0]}")
+                continue
+            self.writer(f"  {name}  {skip.count}")
+            for path in skip.paths:
+                self.writer(f"    {path}")
+            remaining = skip.count - len(skip.paths)
+            if remaining > 0:
+                self.writer(f"    {remaining} more")
+        labels = (
+            ("excluded_ext", "extension"),
+            ("excluded_glob", "pattern"),
+            ("too_large", "larger than the file limit"),
+            ("unreadable", "unreadable"),
+            ("outside_root", "outside the repository"),
+            ("symlink_escapes", "symlink leaving the repository"),
+            ("symlink_dir", "directory symlink"),
+        )
+        skipped = [
+            (label, scope.excluded_counts[key])
+            for key, label in labels
+            if scope.excluded_counts.get(key, 0)
+        ]
+        if skipped:
+            self.writer("Other files skipped")
+            for label, count in skipped:
+                self.writer(f"  {label}  {count}")
 
     def _show_model(self) -> None:
         model = load_model(self.repo)
@@ -808,6 +957,7 @@ class Session:
 
 
 _SEVERITIES = ("critical", "high", "medium", "low", "info")
+_OUTCOMES = ("confirmed", "unsettled")
 
 
 def _category_key(finding: Finding) -> str:
@@ -858,10 +1008,12 @@ def _count_line(
     *,
     header: bool = False,
 ) -> str:
+    labels = [_SEVERITY_LABELS[name] for name in _SEVERITIES] + ["Confirmed", "Unsettled"]
+    keys = [*_SEVERITIES, *_OUTCOMES]
     if header:
-        cells = [_SEVERITY_LABELS[name].rjust(10) for name in _SEVERITIES]
+        cells = [name.rjust(10) for name in labels]
         return label.ljust(width) + "".join(cells) + "Total".rjust(10)
-    cells = [str(counts[name]).rjust(10) for name in _SEVERITIES]
+    cells = [str(counts.get(name, 0)).rjust(10) for name in keys]
     return label.ljust(width) + "".join(cells) + total.rjust(10)
 
 

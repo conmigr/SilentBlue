@@ -31,7 +31,8 @@ _SYSTEM = (
     "You are a defensive security reviewer for Silent Blue. "
     "Report missing or weak security controls. "
     "Cite only files and lines you were shown. "
-    "Describe the control to add. "
+    "The recommendation is the source change for those lines, in the language of that file. "
+    "Do not include a proof-of-concept, a payload, or steps that trigger the flaw. "
     "Return one JSON object and nothing else."
 )
 _FAMILIES = ", ".join(sorted(PLAYBOOKS))
@@ -114,11 +115,34 @@ def run_d2(state: RunState, ctx: StageContext) -> RunState:
     repo = Path(state.repo)
     state_dir = _state_dir(ctx)
     paths, note = build_review_list(repo, state.scope, state_dir)
+    from silentblue.detectors import detect
+
+    detected, _detect_dropped = detect(repo, state.scope)
+    unsettled: list[Finding] = []
+    added = False
+    for finding in detected:
+        if finding.verdict != "inconclusive":
+            continue
+        if finding.file not in paths:
+            paths.append(finding.file)
+            added = True
+        unsettled.append(
+            finding.model_copy(
+                update={"case_id": finding.case_id or case_id_for(finding.file, finding.line, finding.rule_id)}
+            )
+        )
+    if added:
+        note = f"{note} Files with unsettled detector findings were added."
     save_review_list(state_dir, repo, state.run_id, paths, note)
     carried = _carried_findings(repo, ctx.config.output.dirname)
     return ctx.stamp(
         state.model_copy(
-            update={"objectives": [], "review_paths": paths, "review_note": note, "findings": carried}
+            update={
+                "objectives": [],
+                "review_paths": paths,
+                "review_note": note,
+                "findings": [*carried, *unsettled],
+            }
         )
     )
 
@@ -151,7 +175,12 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
     done = set(reviewed)
     pending = [unit for unit in state.units if unit.unit_id not in done]
     repo = Path(state.repo)
-    carried = [item for item in findings if item.origin == "assessment"]
+    carried = [
+        item
+        for item in findings
+        if item.origin == "assessment" or item.verdict == "inconclusive"
+    ]
+    cleared_keys = list(state.cleared_keys)
     known_rows = _known_rows(state, ctx)
     queued = len({path for unit in state.units for path in unit.paths})
     source_files = 0
@@ -165,13 +194,24 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
         model_calls=ctx.model_calls,
     )
 
-    def worker(unit: WorkUnit) -> tuple[str, list[Finding], list[DroppedFinding], list[str], bool]:
+    def worker(unit: WorkUnit) -> tuple[str, list[Finding], list[DroppedFinding], list[str], list[str], bool]:
         return _review_unit(repo, unit, ctx, carried, known_rows, state.run_id)
 
-    for unit_id, found, lost, cleared, keep in _map_work(ctx, pending, worker):
+    for unit_id, found, lost, cleared, confirmed, keep in _map_work(ctx, pending, worker):
         if cleared:
             gone = set(cleared)
+            for item in findings:
+                if item.case_id in gone:
+                    cleared_keys.append(f"{item.file}|{item.line}|{item.rule_id}")
             findings = [item for item in findings if item.case_id not in gone]
+        if confirmed:
+            accepted = set(confirmed)
+            findings = [
+                item.model_copy(update={"verdict": "confirmed"})
+                if item.case_id in accepted and item.verdict == "inconclusive"
+                else item
+                for item in findings
+            ]
         present = {(item.file, item.line, item.rule_id) for item in findings}
         for item in found:
             key = (item.file, item.line, item.rule_id)
@@ -183,14 +223,26 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
             reviewed.append(unit_id)
         state = ctx.stamp(
             state.model_copy(
-                update={"findings": findings, "dropped": dropped, "reviewed_units": reviewed}
+                update={
+                    "findings": findings,
+                    "dropped": dropped,
+                    "reviewed_units": reviewed,
+                    "cleared_keys": cleared_keys,
+                }
             )
         )
         if ctx.store is not None:
             ctx.store.save("d4", state, complete=False)
         ctx.note_progress(units_done=len(reviewed), model_calls=ctx.model_calls)
     return ctx.stamp(
-        state.model_copy(update={"findings": findings, "dropped": dropped, "reviewed_units": reviewed})
+        state.model_copy(
+            update={
+                "findings": findings,
+                "dropped": dropped,
+                "reviewed_units": reviewed,
+                "cleared_keys": cleared_keys,
+            }
+        )
     )
 
 
@@ -266,19 +318,19 @@ def _review_unit(
     carried: list[Finding],
     known_rows: list[Finding],
     run_id: str,
-) -> tuple[str, list[Finding], list[DroppedFinding], list[str], bool]:
+) -> tuple[str, list[Finding], list[DroppedFinding], list[str], list[str], bool]:
     found: list[Finding] = []
     lost: list[DroppedFinding] = []
     excerpts = _excerpts(repo, unit.paths, ctx.config.budgets.max_excerpt_bytes)
     if not excerpts:
-        return unit.unit_id, found, lost, [], False
+        return unit.unit_id, found, lost, [], [], False
     user = _review_prompt(repo, unit, ctx, carried, known_rows, excerpts)
     raw = ctx.complete(_SYSTEM, user)
     _store_reply(ctx, repo, run_id, raw if raw is not None else "(no reply)")
     parsed = _read_review(raw)
     if parsed is None:
-        return unit.unit_id, found, lost, [], False
-    observations, clears = parsed
+        return unit.unit_id, found, lost, [], [], False
+    observations, clears, confirms = parsed
     for item in observations:
         finding = _observation_to_finding(repo, unit, item)
         if finding is None:
@@ -293,7 +345,8 @@ def _review_unit(
             continue
         found.append(finding)
     cleared = _cleared_ids(repo, unit, carried, clears)
-    return unit.unit_id, found, lost, cleared, True
+    confirmed = _cleared_ids(repo, unit, carried, confirms)
+    return unit.unit_id, found, lost, cleared, confirmed, True
 
 
 def _state_dir(ctx: StageContext) -> Path:
@@ -377,7 +430,7 @@ def _review_prompt(
     ]
     case_lines = [
         (
-            f"- {item.case_id} {item.file}:{item.line} "
+            f"- {item.case_id} {item.file}:{item.line} verdict {item.verdict} "
             f"category {item.category or item.control_family}: {item.description}"
         )
         for item in open_cases
@@ -385,24 +438,29 @@ def _review_prompt(
     recorded = [
         f"- {item.rule_id} {item.file}:{item.line} {item.title}"
         for item in known_rows
-        if item.file in unit.paths
+        if item.file in unit.paths and item.verdict != "inconclusive"
     ][:12]
     graph_text = ctx.graph.summary(unit.paths) if ctx.graph_ready else "(none)"
     return (
         f"{_threat_card(repo, _state_dir(ctx))}\n\n"
-        "Open model findings on these files. Each stays open unless you cite "
-        "the line that now enforces the control.\n"
+        "Open cases on these files. An unsettled detector case stays open unless "
+        "you cite a line. A model finding stays open unless you cite the line "
+        "that now enforces the control.\n"
         + ("\n".join(case_lines) or "(none)")
-        + "\n\nDetector and advisory rows already recorded for these paths:\n"
+        + "\n\nDetector rows already confirmed in code:\n"
         + ("\n".join(recorded) or "(none)")
         + f"\n\nSymbol graph:\n{graph_text}\n\n"
         f"Source excerpts:\n{excerpts}\n\n"
         'Return one JSON object {"observations": [{"file", "line", "category", '
-        '"impact", "recommendation"}], "cleared": [{"case_id", "file", "line"}]}. '
+        '"impact", "recommendation"}], "cleared": [{"case_id", "file", "line"}], '
+        '"confirmed": [{"case_id", "file", "line"}]}. '
         "file and line must appear in the excerpts. "
         "category is a short word you choose. "
         "An observation is a missing or weak control. "
+        "recommendation is the replacement to write at that line so a developer can apply it. "
+        "Name the API or setting. Do not include a proof-of-concept or a payload. "
         "A cleared item cites the line that shows the control in place. "
+        "A confirmed item cites the line where a caller value enters the sink. "
         "Use an empty observations array when you see no new gap."
     )
 
@@ -435,7 +493,7 @@ def _store_reply(ctx: StageContext, repo: Path, run_id: str, text: str) -> None:
     save_reply(_state_dir(ctx), repo, run_id, index, text)
 
 
-def _read_review(raw: str | None) -> tuple[list[dict], list[dict]] | None:
+def _read_review(raw: str | None) -> tuple[list[dict], list[dict], list[dict]] | None:
     if raw is None or not str(raw).strip():
         return None
     try:
@@ -445,6 +503,7 @@ def _read_review(raw: str | None) -> tuple[list[dict], list[dict]] | None:
     if not isinstance(data, dict):
         return None
     clears = [item for item in data.get("cleared") or [] if isinstance(item, dict)]
+    confirms = [item for item in data.get("confirmed") or [] if isinstance(item, dict)]
     items = None
     for key in ("observations", "gaps", "findings", "candidates", "issues", "results"):
         if isinstance(data.get(key), list):
@@ -458,7 +517,7 @@ def _read_review(raw: str | None) -> tuple[list[dict], list[dict]] | None:
             normalized = _normalize_observation(item)
             if normalized is not None:
                 observations.append(normalized)
-    return observations, clears
+    return observations, clears, confirms
 
 
 def _has_citation(item: dict) -> bool:
@@ -497,7 +556,7 @@ def _normalize_observation(item: dict) -> dict | None:
         "line": line,
         "category": category[:80],
         "impact": impact[:800],
-        "recommendation": recommendation[:800],
+        "recommendation": recommendation[:4000],
         "severity": normalized.get("severity") or "medium",
         "confidence": normalized.get("confidence", 0.5),
         "title": str(normalized.get("title") or category or "Cited control gap")[:200],
@@ -533,7 +592,7 @@ def _observation_to_finding(repo: Path, unit: WorkUnit, item: dict) -> Finding |
         file=relative,
         line=item["line"],
         description=redact(item["impact"])[:800],
-        remediation=redact(recommendation)[:800],
+        remediation=redact(recommendation)[:4000],
         snippet=snippet,
         confidence=float(confidence),
         origin="assessment",
@@ -883,7 +942,7 @@ def _gap_to_finding(gap: _GapDraft, unit: WorkUnit, playbook: Playbook) -> Findi
         file=relative,
         line=gap.line,
         description=redact(gap.description.strip())[:800],
-        remediation=redact(remediation)[:800],
+        remediation=redact(remediation)[:4000],
         confidence=confidence,
         origin="assessment",
         playbook=playbook.playbook_id,

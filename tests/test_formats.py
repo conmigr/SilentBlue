@@ -56,13 +56,11 @@ def test_html_escapes_text_and_states_the_cost():
     html = render_html(_report())
     assert "SQL &lt;built&gt;" in html
     assert "<script" not in html
-    assert "<dt>Estimated cost USD:</dt><dd>0.0000</dd>" in html
-    assert "<dt>Severity:</dt><dd>high</dd>" in html
-    assert "<dt>File:</dt><dd>app.py</dd>" in html
-    assert "<dt>Line:</dt><dd>2</dd>" in html
-    assert "<h3>Description:</h3>" in html
-    assert "<h3>Evidence:</h3>" in html
-    assert "<h3>Remediation:</h3>" in html
+    assert "Estimated cost USD 0.0000." in html
+    assert "high · sql-unparameterized · app.py:2" in html
+    assert "<h3>Description</h3>" in html
+    assert "<h3>Evidence</h3>" in html
+    assert "<h3>Remediation</h3>" in html
     assert "CVSS." not in html
     assert "http://" not in html
     assert "https://" not in html
@@ -71,13 +69,14 @@ def test_html_escapes_text_and_states_the_cost():
 def test_markdown_uses_labeled_findings():
     markdown = render_markdown(_report())
     assert "## Finding 1: SQL <built>" in markdown
-    assert "Severity: high" in markdown
-    assert "File: app.py" in markdown
-    assert "Line: 2" in markdown
+    assert "high · sql-unparameterized · app.py:2" in markdown
+    assert "## Result" in markdown
+    assert "## Index" in markdown
+    assert "### Record" in markdown
     assert "Description:\nThe query is assembled." in markdown
-    assert "Evidence:\n    conn.execute" in markdown
+    assert "```app.py\nconn.execute" in markdown
     assert "Remediation:\nUse a bound parameter." in markdown
-    assert "Component:" not in markdown
+    assert "Findings are candidates" not in markdown
 
 
 def test_pdf_is_a_real_document():

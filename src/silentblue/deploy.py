@@ -6,6 +6,7 @@ ports, send a payload, or follow a redirect to another host.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,7 @@ _SKIP_DIRS = frozenset(
 _MAX_FILES = 200
 _MAX_BYTES = 256 * 1024
 _WINDOW = 30
+_AUTH_WINDOW = timedelta(minutes=10)
 _CERT_SOON = timedelta(days=14)
 
 _EDGE = re.compile(
@@ -99,6 +101,49 @@ class UrlObservation:
     location: str = ""
 
 
+class DeployAuthorization(BaseModel):
+    """Confirmation for one host. The window closes with the command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    host: str
+    confirmed_at: str
+    expires_at: str
+
+
+def open_authorization(state_dir: Path, repo: Path, host: str) -> DeployAuthorization:
+    """Record the host and the window outside the repository."""
+
+    if is_within(repo.resolve(), state_dir.resolve()):
+        raise UsageError("state directory must be outside the repository")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    record = DeployAuthorization(
+        host=host.lower(),
+        confirmed_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=(now + _AUTH_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    path = _authorization_path(state_dir, repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(record.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n")
+    return record
+
+
+def authorization_allows(record: DeployAuthorization, host: str, now: datetime | None = None) -> bool:
+    """True when this host is the confirmed host and the window is open."""
+
+    current = now or datetime.now(timezone.utc)
+    try:
+        expires = datetime.strptime(record.expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return bool(host) and record.host.lower() == host.lower() and current <= expires
+
+
+def _authorization_path(state_dir: Path, repo: Path) -> Path:
+    digest = hashlib.sha256(str(repo.resolve()).encode("utf-8")).hexdigest()[:16]
+    return state_dir / "deploy" / f"{digest}.json"
+
+
 def run_deploy(
     *,
     repo: Path,
@@ -110,6 +155,7 @@ def run_deploy(
     cwd: Path | None = None,
     argv: list[str] | None = None,
     transport=None,
+    authorization: DeployAuthorization | None = None,
 ) -> DeployResult:
     """Append deployment gaps to the current report. Source stays unchanged."""
 
@@ -135,11 +181,16 @@ def run_deploy(
         if snapshot_path is not None:
             account_observed = True
             observed.extend(_snapshot_findings(_read_snapshot(root, snapshot_path)))
+        edge_passed: list[str] = []
         if named_url:
+            host = urlsplit(named_url).hostname or ""
+            if authorization is not None and not authorization_allows(authorization, host):
+                raise UsageError("deploy authorization does not match this host")
             observation = transport(named_url) if transport is not None else fetch_url(named_url)
             url_observed = observation.error != "unreachable"
-            observed.extend(_url_findings(named_url, observation, report.findings))
-        merged = _merge(report, declared, observed, account_observed, url_observed)
+            found, edge_passed = _url_findings(named_url, observation, report.findings)
+            observed.extend(found)
+        merged = _merge(report, declared, observed, account_observed, url_observed, edge_passed)
         written = write_report(merged, root, "security-scan", datetime.now(timezone.utc))
         findings_path = str(written)
         message = (
@@ -433,7 +484,9 @@ def _snapshot_findings(snapshot: _Snapshot) -> list[Finding]:
     return found
 
 
-def _url_findings(url: str, observation: UrlObservation, existing: list[Finding]) -> list[Finding]:
+def _url_findings(
+    url: str, observation: UrlObservation, existing: list[Finding]
+) -> tuple[list[Finding], list[str]]:
     host = urlsplit(url).hostname or "url"
     if observation.error == "unreachable":
         return [
@@ -447,7 +500,7 @@ def _url_findings(url: str, observation: UrlObservation, existing: list[Finding]
                 "Confirm the host name and that this machine may open that one URL.",
                 "observed",
             )
-        ]
+        ], []
     if observation.error == "untrusted":
         return [
             _gap(
@@ -460,7 +513,7 @@ def _url_findings(url: str, observation: UrlObservation, existing: list[Finding]
                 "Serve a certificate from a trusted issuer for this host name.",
                 "observed",
             )
-        ]
+        ], []
     found: list[Finding] = []
     scheme = urlsplit(url).scheme
     location = observation.location
@@ -508,7 +561,66 @@ def _url_findings(url: str, observation: UrlObservation, existing: list[Finding]
             )
         )
     found.extend(_cert_findings(host, observation.cert))
-    return found
+    header_gaps, passed = _header_checks(url, observation.headers)
+    found.extend(header_gaps)
+    return found, passed
+
+
+def _header_checks(url: str, headers: list[tuple[str, str]]) -> tuple[list[Finding], list[str]]:
+    """Missing response headers are findings. Present headers are passed checks."""
+
+    folded = {name.lower(): value.strip() for name, value in headers}
+    found: list[Finding] = []
+    passed: list[str] = []
+    if urlsplit(url).scheme == "https":
+        if folded.get("strict-transport-security", ""):
+            passed.append("hsts")
+        else:
+            found.append(
+                _gap(
+                    "deploy-hsts-missing",
+                    "medium",
+                    "Live response has no HSTS header",
+                    "url",
+                    1,
+                    "Observed. The HTTPS response did not send Strict-Transport-Security.",
+                    "Send Strict-Transport-Security on the HTTPS response.",
+                    "observed",
+                )
+            )
+    content_type = folded.get("x-content-type-options", "")
+    if content_type.lower() == "nosniff":
+        passed.append("content-type-options")
+    else:
+        found.append(
+            _gap(
+                "deploy-content-type-options",
+                "low",
+                "Live response does not set nosniff",
+                "url",
+                1,
+                "Observed. The response did not send X-Content-Type-Options: nosniff.",
+                "Send X-Content-Type-Options: nosniff.",
+                "observed",
+            )
+        )
+    policy = folded.get("content-security-policy", "").lower()
+    if folded.get("x-frame-options", "") or "frame-ancestors" in policy:
+        passed.append("frame-options")
+    else:
+        found.append(
+            _gap(
+                "deploy-frame-options",
+                "low",
+                "Live response does not set a frame policy",
+                "url",
+                1,
+                "Observed. The response did not send X-Frame-Options or a frame-ancestors policy.",
+                "Send X-Frame-Options or a Content-Security-Policy frame-ancestors directive.",
+                "observed",
+            )
+        )
+    return found, passed
 
 
 def _cert_findings(host: str, cert: dict | None) -> list[Finding]:
@@ -695,7 +807,14 @@ def _gap(
     )
 
 
-def _merge(report, declared: list[Finding], observed: list[Finding], account: bool, url: bool):
+def _merge(
+    report,
+    declared: list[Finding],
+    observed: list[Finding],
+    account: bool,
+    url: bool,
+    edge_passed: list[str] | None = None,
+):
     kept = [item for item in report.findings if item.control_family != "deployment"]
     fresh = [_with_case(item, {finding.case_id for finding in kept}) for item in declared + observed]
     used = {item.case_id for item in kept}
@@ -719,7 +838,14 @@ def _merge(report, declared: list[Finding], observed: list[Finding], account: bo
         summary = summary.split("Deployment review recorded", 1)[0].rstrip()
     summary = f"{summary} {sentence}".strip()
     metrics = report.metrics.model_copy(update={"findings": len(kept) + len(unique)})
-    return report.model_copy(update={"summary": redact(summary), "findings": kept + unique, "metrics": metrics})
+    return report.model_copy(
+        update={
+            "summary": redact(summary),
+            "findings": kept + unique,
+            "metrics": metrics,
+            "edge_passed": list(edge_passed or []),
+        }
+    )
 
 
 def _with_case(finding: Finding, used: set[str]) -> Finding:

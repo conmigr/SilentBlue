@@ -27,7 +27,7 @@ silentblue = "silentblue.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-silentblue = ["profiles/*.yaml", "py.typed"]
+silentblue = ["profiles/*.yaml", "py.typed", "skills/*/SKILL.md", "skills/*/references/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

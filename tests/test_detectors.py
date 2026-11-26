@@ -33,6 +33,87 @@ def test_parameterized_sql_and_comments_are_quiet(tmp_path):
     assert findings == []
 
 
+def test_sql_closes_a_bound_value_a_fixed_clause_and_a_non_database_call(tmp_path):
+    findings = _scan(
+        tmp_path,
+        "app.py",
+        "\n".join(
+            [
+                'agent.query(f"SELECT {name}")',
+                'print(f"Test 1: {query}")',
+                'conn.execute("SELECT * FROM users WHERE company LIKE %s", (f"%{company}",))',
+                'conn.execute("SELECT * FROM t WHERE id = %s " + "AND active = 1", {"id": user_id})',
+                'conn.execute("INSERT INTO t " + clause)',
+                'conn.execute("INSERT INTO t " + clause)',
+                'conn.execute("SELECT " + name)',
+                "",
+            ]
+        ),
+    )
+    sql = [item for item in findings if item.rule_id == "sql-unparameterized"]
+    assert len(sql) == 2
+    confirmed = [item for item in sql if item.verdict == "detector"]
+    unsettled = [item for item in sql if item.verdict == "inconclusive"]
+    assert len(confirmed) == 1
+    assert confirmed[0].line == 7
+    assert len(unsettled) == 1
+    assert unsettled[0].also_at == [6]
+
+
+def test_a_live_secret_stays_and_a_fixture_closes(tmp_path):
+    findings = _scan(
+        tmp_path,
+        "test_smoke.py",
+        "\n".join(
+            [
+                'password = "smoke-test"',
+                'api_key = "AKIAIOSFODNN7EXAMPLE"',
+                "",
+            ]
+        ),
+    )
+    assert [item.line for item in findings] == [2]
+    assert findings[0].rule_id == "hardcoded-secret"
+
+
+def test_identical_copies_are_one_finding(tmp_path):
+    source = 'conn.execute("SELECT " + name)\n'
+    (tmp_path / "app.py").write_text(source, encoding="utf-8")
+    (tmp_path / "backups").mkdir()
+    nested = tmp_path / "pkg"
+    nested.mkdir()
+    (nested / "app.py").write_text(source, encoding="utf-8")
+    from silentblue.models import ScopedFile, ScopeResult
+    from silentblue.detectors import detect
+
+    scope = ScopeResult(
+        files=[
+            ScopedFile(path="pkg/app.py", size=len(source), language="python"),
+            ScopedFile(path="app.py", size=len(source), language="python"),
+        ]
+    )
+    findings, _dropped = detect(tmp_path, scope)
+    sql = [item for item in findings if item.rule_id == "sql-unparameterized"]
+    assert len(sql) == 1
+    assert sql[0].file == "app.py"
+    assert sql[0].also_in == ["pkg/app.py"]
+
+
+def test_mirror_directories_are_not_scanned(tmp_path):
+    from silentblue.scope import collect_scope
+    from silentblue.models import ScopeConfig
+
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "requirements.txt").write_text("requests==1\n", encoding="utf-8")
+    (tmp_path / "backups").mkdir()
+    (tmp_path / "backups" / "requirements.txt").write_text("requests==1\n", encoding="utf-8")
+    scope = collect_scope(tmp_path, ScopeConfig())
+    assert [item.path for item in scope.files] == ["app.py"]
+    assert ".claude" in scope.mirror_dirs
+    assert "backups" in scope.mirror_dirs
+
+
 def test_secret_placeholder_is_skipped(tmp_path):
     findings = _scan(
         tmp_path,

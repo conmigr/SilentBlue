@@ -38,7 +38,8 @@ ROUTER_SYSTEM = (
     "/findings category <name>, /findings osv, /finding <number or case id>, "
     "/report, /model, /model draft, /model draft assess, /model accept, "
     "/model assume <text>, /scan, /scan assess, /scan osv, /scan assess osv, "
-    "/scan resume, /deploy, /cost, /quit. "
+    "/scan resume, /deploy, /cost, /exclusions, /skills, /skill <name>, "
+    "/triage, /triage accept <case id> <date> <reason>, /triage assign <case id> <owner>, /quit. "
     "If the sentence asks to change the mission, hide a finding, mark a false positive, "
     "or scan a different repository, return refuse. "
     "If two tools fit, return ask. Do not invent findings."
@@ -64,6 +65,9 @@ _COMMANDS = frozenset(
         "/scan resume",
         "/deploy",
         "/cost",
+        "/exclusions",
+        "/skills",
+        "/triage",
         "/quit",
     }
 )
@@ -118,6 +122,18 @@ _PHRASES: tuple[tuple[str, str], ...] = (
     ("show cost", "/cost"),
     ("session cost", "/cost"),
     ("show session cost", "/cost"),
+    ("exclusions", "/exclusions"),
+    ("show exclusions", "/exclusions"),
+    ("list exclusions", "/exclusions"),
+    ("what is excluded", "/exclusions"),
+    ("what was excluded", "/exclusions"),
+    ("show excluded directories", "/exclusions"),
+    ("show skipped directories", "/exclusions"),
+    ("skills", "/skills"),
+    ("show skills", "/skills"),
+    ("list skills", "/skills"),
+    ("triage", "/triage"),
+    ("show triage", "/triage"),
     ("quit", "/quit"),
     ("exit", "/quit"),
 )
@@ -141,6 +157,12 @@ _MISSION_PATTERNS = (
 )
 _CASE = re.compile(r"^sb1_[0-9a-f]{32}$")
 _CATEGORY_NAME = re.compile(r"[a-z0-9][a-z0-9 _-]*")
+_SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_TRIAGE_ACCEPT = re.compile(
+    r"^/triage accept (sb1_[0-9a-f]{32}) (\d{4}-\d{2}-\d{2}) (.+)$",
+    re.IGNORECASE,
+)
+_TRIAGE_ASSIGN = re.compile(r"^/triage assign (sb1_[0-9a-f]{32}) (\S+)$", re.IGNORECASE)
 _FAMILIES = tuple(PLAYBOOKS) + ("deployment",)
 _CATEGORY_SKIP = frozenset(
     {"show", "list", "open", "get", "only", "for", "in", "with", "by", "control", "family", "families", "all"}
@@ -184,6 +206,9 @@ def interpret(line: str) -> Decision:
         return Decision("say", reason="model")
     if any(content == phrase for phrase, _command in _PHRASES):
         return _phrase(content)
+    skill = _skill_request(content)
+    if skill is not None:
+        return skill
     category = _category_request(content)
     if category is not None:
         return category
@@ -273,6 +298,27 @@ def _slash(raw: str, lowered: str) -> Decision | None:
         return None
     if lowered in _COMMANDS:
         return Decision("tool", command=lowered)
+    if lowered.startswith("/skill "):
+        name = lowered.split(None, 1)[1].strip()
+        if _SKILL_NAME.fullmatch(name):
+            return Decision("tool", command=f"/skill {name}")
+        return Decision("refuse", reason="tool")
+    if lowered.startswith("/triage accept "):
+        match = _TRIAGE_ACCEPT.match(" ".join(raw.split()))
+        if match is None:
+            return Decision("refuse", reason="tool")
+        case_id, day, reason = match.groups()
+        return Decision(
+            "tool",
+            command=f"/triage accept {case_id.lower()} {day} {reason.strip()}",
+            confirm=True,
+        )
+    if lowered.startswith("/triage assign "):
+        match = _TRIAGE_ASSIGN.match(" ".join(raw.split()))
+        if match is None:
+            return Decision("refuse", reason="tool")
+        case_id, owner = match.groups()
+        return Decision("tool", command=f"/triage assign {case_id.lower()} {owner}", confirm=True)
     if lowered.startswith("/findings category "):
         name = " ".join(lowered.split(None, 2)[2].split())
         if name and len(name) <= 80 and _CATEGORY_NAME.fullmatch(name):
@@ -409,12 +455,32 @@ def _content(text: str) -> str:
 
 
 def _confirms(command: str) -> bool:
-    return command in {"/model accept"} or command.startswith("/model assume ")
+    return command in {"/model accept"} or command.startswith(("/model assume ", "/triage accept ", "/triage assign "))
+
+
+def _skill_request(content: str) -> Decision | None:
+    """Map a sentence about one skill onto /skill. The list is an exact phrase."""
+
+    tokens = content.split()
+    if len(tokens) == 2 and tokens[1] == "skill" and _SKILL_NAME.fullmatch(tokens[0]):
+        return Decision("tool", command=f"/skill {tokens[0]}")
+    if len(tokens) == 3 and tokens[0] == "show" and tokens[2] == "skill" and _SKILL_NAME.fullmatch(tokens[1]):
+        return Decision("tool", command=f"/skill {tokens[1]}")
+    if len(tokens) == 3 and tokens[0] == "show" and tokens[1] == "skill" and _SKILL_NAME.fullmatch(tokens[2]):
+        return Decision("tool", command=f"/skill {tokens[2]}")
+    return None
 
 
 def _allowed(command: str) -> bool:
     if command in _COMMANDS:
         return True
+    if command.startswith("/skill "):
+        name = command.split(None, 1)[1].strip()
+        return _SKILL_NAME.fullmatch(name) is not None
+    if command.startswith("/triage accept "):
+        return _TRIAGE_ACCEPT.match(command) is not None
+    if command.startswith("/triage assign "):
+        return _TRIAGE_ASSIGN.match(command) is not None
     if command.startswith("/findings category "):
         name = command.split(None, 2)[2].strip()
         return bool(name) and len(name) <= 80 and _CATEGORY_NAME.fullmatch(name) is not None

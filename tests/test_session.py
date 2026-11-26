@@ -70,6 +70,7 @@ def test_help_findings_and_phrases(workspace):
     text = _run(workspace, ["/help", "show findings", "/quit"])
     assert "/findings" in text
     assert "/findings osv" in text
+    assert "/exclusions" in text
     assert "/scan osv" in text
     assert "/model draft" in text
     assert "sql-unparameterized" in text
@@ -116,6 +117,24 @@ def _inject_osv(repo) -> None:
         update={"advisories": "queried", "findings": [*report.findings, advisory]}
     )
     path.write_text(updated.model_dump_json(indent=2), encoding="utf-8")
+
+
+def test_show_exclusions_names_directories_present_here(workspace):
+    repo = _repo(workspace)
+    (repo / ".cursor").mkdir()
+    (repo / ".cursor" / "argv.json").write_text("{}\n", encoding="utf-8")
+    (repo / "backups").mkdir()
+    (repo / "backups" / "old.py").write_text("x = 1\n", encoding="utf-8")
+    text = _run(workspace, ["show exclusions", "/quit"])
+    policy, _, present = text.partition("Present in this repository")
+    assert "Directories left out of the scan" in policy
+    assert ".claude" in policy
+    assert ".cursor" in policy
+    assert "backups" in policy
+    assert ".cursor" in present
+    assert "backups" in present
+    assert "security-scan" in present
+    assert ".claude" not in present
 
 
 def test_findings_count_by_category_then_filter(workspace):

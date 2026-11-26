@@ -80,10 +80,10 @@ def test_confirmed_gap_carries_playbook_line_and_verdict(workspace):
     assert report["metrics"]["model_review"] == "complete"
     assert report["hollow"] is False
     markdown = next((workspace["repo"] / "security-scan").glob("*_report.md")).read_text(encoding="utf-8")
-    assert "Impact:" in markdown
-    assert "Recommendation:" in markdown
-    assert "Playbook: injection" in markdown
-    assert "Verdict: confirmed" in markdown
+    assert "Description:" in markdown
+    assert "Remediation:" in markdown
+    assert "Playbook injection" in markdown
+    assert "Verdict confirmed" in markdown
     assert any("read_user calls execute" in prompt for prompt in client.prompts)
 
 

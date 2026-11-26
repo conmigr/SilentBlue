@@ -42,10 +42,18 @@ def run_d5(state: RunState, ctx: StageContext) -> RunState:
         raise UsageError("scope is missing")
     bound, dropped = bind_assessment(state)
     detected, detect_dropped = detect(Path(state.repo), state.scope)
+    cleared = set(state.cleared_keys)
+    existing = {f"{item.file}|{item.line}|{item.rule_id}" for item in bound}
+    fresh = [
+        item
+        for item in detected
+        if f"{item.file}|{item.line}|{item.rule_id}" not in existing
+        and f"{item.file}|{item.line}|{item.rule_id}" not in cleared
+    ]
     return ctx.stamp(
         state.model_copy(
             update={
-                "findings": [*bound, *detected],
+                "findings": [*bound, *fresh],
                 "dropped": [*state.dropped, *dropped, *detect_dropped],
             }
         )
