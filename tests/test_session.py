@@ -67,8 +67,12 @@ def test_findings_show_the_asset_line(workspace):
 
 
 def test_help_findings_and_phrases(workspace):
-    text = _run(workspace, ["/help", "show findings", "/quit"])
-    assert "/findings" in text
+    text = _run(
+        workspace,
+        ["/help", "/help scan", "/help findings", "/help model", "show findings", "/quit"],
+    )
+    assert "/status" in text
+    assert "/help scan" in text
     assert "/findings osv" in text
     assert "/exclusions" in text
     assert "/scan osv" in text
@@ -424,3 +428,28 @@ def test_a_file_cannot_accept_itself(workspace):
     again = json.loads((repo / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert again["threat_model"] == "draft"
     assert all(item["threat_note"] == "" for item in again["findings"])
+
+
+def test_a_terminal_session_marks_each_turn(workspace):
+    pending = iter(["/help", "/findings", "/finding 1", "/quit"])
+    output: list[str] = []
+    code = run_session(
+        _repo(workspace),
+        state_dir=workspace["state"],
+        manifest_dir=workspace["manifests"],
+        reader=lambda: next(pending),
+        writer=output.append,
+        human=True,
+    )
+    text = "\n".join(output)
+    assert code == 0
+    assert "working  Detect scan" in text
+    assert "done  " in text
+    assert "Type /help" not in text
+    assert "\n  d0  completed" not in text
+    assert "Findings  " in text
+    assert "Severity" in text
+    assert "rep-1" in text
+    assert "Why it matters" in text
+    assert "**Title:**" not in text
+    assert "/help scan" in text

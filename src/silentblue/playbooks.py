@@ -238,3 +238,71 @@ PLAYBOOKS: dict[str, Playbook] = {
 
 def playbook_for(family: str) -> Playbook | None:
     return PLAYBOOKS.get(family)
+
+
+_MATTER: dict[str, tuple[str, str]] = {
+    "secrets": (
+        "A credential stored in the repository can be copied by anyone who can read the file.",
+        "A copied credential exposes the account it belongs to until that credential is revoked.",
+    ),
+    "injection": (
+        "A query, command, or document built from caller text lets that text change what the program runs.",
+        "The caller can read or change data, or run a command, beyond the action the program intended.",
+    ),
+    "transport": (
+        "A client that skips certificate checks will accept a connection that is not the named server.",
+        "Traffic meant for that server can be read or changed on the network path.",
+    ),
+    "configuration": (
+        "Shared configuration that enables debug mode or an open host list exposes detail the deployment should keep closed.",
+        "A caller can reach internal detail or a host the application did not name.",
+    ),
+    "access-control": (
+        "An origin, a field list, or an ownership check that is missing lets a caller act outside their grant.",
+        "A caller can read or change another caller's data, or use a route they are not allowed to use.",
+    ),
+    "cryptography": (
+        "A password hash or token generator that is not built for secrets can be guessed or reversed.",
+        "Someone who sees the stored value can recover the password or the token.",
+    ),
+    "deserialization": (
+        "A decoder that builds objects from a stream will construct the types carried in that stream.",
+        "The stream can cause the process to run code or load objects the application did not choose.",
+    ),
+    "request-routing": (
+        "A URL, file path, or redirect taken from the request follows a target the application did not choose.",
+        "The application can read a file outside its root, or send the caller to a site it did not name.",
+    ),
+    "authentication": (
+        "A session that is not verified, not marked, or not given an expiry can be reused or forged.",
+        "A caller can present another caller's session, or keep a session after it should have ended.",
+    ),
+    "resource-limits": (
+        "A login, signup, password, or upload route without a limit accepts every request a caller sends.",
+        "Those routes can be flooded until the service stops answering other callers.",
+    ),
+    "logging": (
+        "An authentication failure that is not recorded leaves no trace, and a log line that includes the credential stores the secret.",
+        "The failure cannot be investigated later, or the credential is copied into the log.",
+    ),
+    "supply-chain": (
+        "A dependency or workflow that is not pinned, not fetched over TLS, or granted a wide permission can change what the build runs.",
+        "The build can install a different artifact, or a workflow can use a permission the repository did not name.",
+    ),
+    "deployment": (
+        "A deployed response that omits a browser control, or stays on cleartext, leaves the client without that protection.",
+        "A browser or a network path can read or frame the response in a way the missing control was meant to prevent.",
+    ),
+}
+
+
+def why_it_matters(family: str) -> tuple[str, str]:
+    """One sentence for the missing control, and one sentence for the harm."""
+
+    return _MATTER.get(
+        family,
+        (
+            "This line is missing a control this assessment expected to see.",
+            "The missing control can let a caller do more than the application intended.",
+        ),
+    )

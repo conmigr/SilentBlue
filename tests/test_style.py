@@ -11,6 +11,8 @@ def test_paint_uses_one_blue_for_chrome(monkeypatch):
     assert "silentblue>" in prompt
     assert finding.endswith("sql-unparameterized  app.py:2")
     assert "\033[38;2;79;125;176m1\033[0m" in finding
+    assert paint("working  Detect scan").startswith("\033[38;2;79;125;176mworking")
+    assert paint("yes/no> ").startswith("\033[38;2;79;125;176m")
 
 
 def test_paint_is_plain_when_color_is_disabled(monkeypatch):

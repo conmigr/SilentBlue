@@ -26,6 +26,7 @@ from silentblue.rank import prioritize
 from silentblue.scanledger import ledger_from_state
 from silentblue.redact import redact
 from silentblue.repair import APPLY_MARK, apply_note
+from silentblue.playbooks import why_it_matters
 
 _LEVEL = {
     "critical": "error",
@@ -176,124 +177,12 @@ def write_report(
     return written
 
 
-_SEVERITIES = ("critical", "high", "medium", "low", "info")
-_STAGE_TITLES = {
-    "d0": "Scope",
-    "d1": "Context",
-    "d2": "Review list",
-    "d3": "Units",
-    "d4": "Model review",
-    "d5": "Detectors",
-    "d6": "Review stamp",
-    "d7": "Dedup",
-    "d8": "Rank",
-    "d9": "Report",
-}
-_DROP_GLOSS = {
-    "not_a_sink": "the line is not the call the rule is about",
-    "bound_parameter": "the assembled text is a bound value",
-    "fixed_clause": "the inserted text is a fixed clause",
-    "fixture": "the value is a fixture, not a live credential",
-    "duplicate": "the same rule already covers a nearby line",
-}
-
-
 def render_markdown(report: FinalReport) -> str:
-    """Human report. The JSON summary stays at the end, under Record."""
+    """The assessment reading copy. The JSON summary stays under Record."""
 
-    metrics = report.metrics
-    review = metrics.model_review or "not run"
-    lines = [
-        "# Control gap report",
-        "",
-        (
-            f"{report.repo_name} · {report.profile} · silentblue {report.version} · "
-            f"{report.generated_at} · schema {report.schema_version}"
-        ),
-        f"Advisories {report.advisories} · threat model {report.threat_model} · model review {review}",
-        "",
-        "## Result",
-        "",
-    ]
-    lines.extend(_severity_table(report.findings))
-    lines.append("")
-    lines.extend(_category_table(report.findings))
-    lines.append("")
-    lines.append(
-        f"Scope: {metrics.files} files, {metrics.bytes} bytes, {metrics.primary_language}."
-    )
-    if metrics.model_calls:
-        lines.append(
-            "Cost: estimated "
-            f"{format_usd(metrics.estimated_cost_usd, metrics.rate_known)} USD, actual "
-            f"{format_usd(metrics.actual_cost_usd, metrics.usage_known and metrics.rate_known)} USD, "
-            f"{metrics.model_calls} model calls."
-        )
-    if report.hollow:
-        lines.append("This empty result is untrusted. No source was sent for review.")
-    elif not report.findings:
-        lines.append("No control gaps were reported. Review the coverage ledger before treating the repository as covered.")
-    if report.coverage is not None:
-        lines.extend(["", "## Coverage", ""])
-        lines.extend(_coverage_lines(report.coverage))
-    if report.edge_passed:
-        lines.append(f"Edge checks passed: {', '.join(report.edge_passed)}.")
-    lines.extend(["", "## Index", ""])
-    if not report.findings:
-        lines.append("None.")
-    else:
-        lines.extend(_index_table(report.findings))
-    lines.extend(["", f"## Findings ({len(report.findings)})", ""])
-    if not report.findings:
-        lines.append("None.")
-        lines.append("")
-    for index, finding in enumerate(report.findings, start=1):
-        lines.extend(_finding_block(index, finding))
-    lines.extend(_dropped_section(report.dropped))
-    lines.extend(["", "## Appendix", "", "### Stages", ""])
-    for name, outcome in report.stages.items():
-        title = _STAGE_TITLES.get(name, name)
-        lines.append(f"{title} ({name}): {outcome}")
-    lines.extend(["", "### Record", "", report.summary, ""])
-    return "\n".join(lines)
+    from silentblue.reading import render_markdown as _render
 
-
-def _coverage_lines(coverage) -> list[str]:
-    checked = sum(1 for row in coverage.rows if row.families)
-    skipped: dict[str, int] = {}
-    for row in coverage.rows:
-        if row.reason:
-            skipped[row.reason] = skipped.get(row.reason, 0) + 1
-    lines = [
-        f"Saturated: {'yes' if coverage.saturated else 'no'}",
-        f"Checked: {checked}",
-    ]
-    for reason in sorted(skipped):
-        lines.append(f"Skipped {reason}: {skipped[reason]}")
-    if coverage.unread:
-        shown = ", ".join(coverage.unread[:8])
-        lines.append(f"Unread review paths: {shown}")
-    return lines
-
-
-def _metric_lines(metrics: Metrics) -> list[str]:
-    return [
-        f"Files: {metrics.files}",
-        f"Bytes: {metrics.bytes}",
-        f"Primary language: {metrics.primary_language}",
-        f"Findings: {metrics.findings}",
-        f"Dropped: {metrics.dropped}",
-        f"Symlink escapes excluded: {metrics.symlink_escapes}",
-        f"Model calls: {metrics.model_calls}",
-        f"Model list: {metrics.model_paths_read} of {metrics.model_paths} read",
-        f"Model review: {metrics.model_review or 'not run'}",
-        f"Estimated model calls: {metrics.estimated_calls}",
-        f"Estimated cost USD: {format_usd(metrics.estimated_cost_usd, metrics.rate_known)}",
-        f"Actual cost USD: {format_usd(metrics.actual_cost_usd, metrics.usage_known and metrics.rate_known)}",
-        f"Input tokens: {metrics.input_tokens}",
-        f"Output tokens: {metrics.output_tokens}",
-        f"Price table: {metrics.price_date or 'none'}",
-    ]
+    return _render(report)
 
 
 def render_sarif(report: FinalReport) -> dict:
@@ -315,12 +204,15 @@ def render_sarif(report: FinalReport) -> dict:
                     "properties": {"controlFamily": finding.control_family},
                 }
             )
+        _why, _impact = why_it_matters(finding.control_family)
         result: dict = {
             "ruleId": finding.rule_id,
             "level": _LEVEL[finding.severity],
             "message": {
                 "text": redact(
-                    f"{finding.title}\n{finding.description}\nRemediation: {finding.remediation}"
+                    f"{finding.title}\n{finding.description}\n"
+                    f"Why it matters: {_why}\nImpact: {_impact}\n"
+                    f"Remediation: {finding.remediation}"
                 )
             },
             "locations": [_location(finding.file, finding.line)],
@@ -434,158 +326,12 @@ def finding_sections(finding: Finding) -> list[tuple[str, str]]:
     return sections
 
 
-def finding_lines(finding: Finding, index: int) -> list[str]:
+def finding_lines(finding: Finding, index: int, repo_name: str = "") -> list[str]:
     """The finding block printed by the report and by /finding."""
 
-    return _finding_block(index, finding)
+    from silentblue.reading import finding_markdown
 
-
-def _finding_block(index: int, finding: Finding) -> list[str]:
-    number = finding.number or index
-    lines = [
-        f"## Finding {number}: {finding.title}",
-        "",
-        _identity(finding),
-    ]
-    cvss = _cvss_line(finding)
-    if cvss:
-        lines.append(cvss)
-    extra = _extra_line(finding)
-    if extra:
-        lines.append(extra)
-    lines.append("")
-    for label, text in finding_sections(finding):
-        lines.append(f"{label}:")
-        if label == "Evidence":
-            lines.extend(_fence(finding.file, text))
-        elif text:
-            lines.append(text.rstrip("\n"))
-        lines.append("")
-    return lines
-
-
-def _identity(finding: Finding) -> str:
-    case = finding.case_id or "unassigned"
-    return f"{finding.severity} · {finding.rule_id} · {finding.file}:{finding.line} · {case}"
-
-
-def _cvss_line(finding: Finding) -> str:
-    if finding.cvss_score is None:
-        return ""
-    version = finding.cvss_version or "3.1"
-    score = format(finding.cvss_score, ".1f")
-    vector = f" {finding.cvss_vector}" if finding.cvss_vector else ""
-    return f"CVSS {version} {score}{vector}"
-
-
-def _extra_line(finding: Finding) -> str:
-    parts: list[str] = []
-    if finding.verdict:
-        parts.append(f"Verdict {finding.verdict}")
-    if finding.playbook:
-        parts.append(f"Playbook {finding.playbook}")
-    if finding.category:
-        parts.append(f"Category {finding.category}")
-    if finding.advisory_id:
-        parts.append(f"Advisory {finding.advisory_id}")
-    component = finding.component
-    if component is not None and component.purl.startswith("pkg:"):
-        parts.append(
-            f"Component {component.ecosystem} {component.name} {component.version}".strip()
-        )
-        if component.fixed_version:
-            parts.append(f"Fixed {component.fixed_version}")
-    if finding.also_at:
-        parts.append("Also at " + ", ".join(str(line) for line in finding.also_at))
-    if finding.also_in:
-        parts.append("Also in " + ", ".join(finding.also_in))
-    return " · ".join(parts)
-
-
-def _fence(path: str, snippet: str) -> list[str]:
-    if not snippet:
-        return []
-    marker = "```"
-    while marker in snippet:
-        marker += "`"
-    return [f"{marker}{path}", *snippet.splitlines(), marker]
-
-
-def _severity_table(findings: list[Finding]) -> list[str]:
-    counts = {name: 0 for name in _SEVERITIES}
-    for finding in findings:
-        counts[finding.severity] = counts.get(finding.severity, 0) + 1
-    header = "| Severity | " + " | ".join(name.capitalize() for name in _SEVERITIES) + " |"
-    rule = "| --- | " + " | ".join("---" for _ in _SEVERITIES) + " |"
-    row = "| Count | " + " | ".join(str(counts[name]) for name in _SEVERITIES) + " |"
-    return [header, rule, row]
-
-
-def _category_table(findings: list[Finding]) -> list[str]:
-    buckets: dict[str, dict[str, int]] = {}
-    for finding in findings:
-        key = finding.control_family or "unspecified"
-        bucket = buckets.setdefault(key, {name: 0 for name in (*_SEVERITIES, "confirmed", "unsettled")})
-        bucket[finding.severity] = bucket.get(finding.severity, 0) + 1
-        if finding.verdict == "inconclusive":
-            bucket["unsettled"] += 1
-        else:
-            bucket["confirmed"] += 1
-    header = (
-        "| Control category | "
-        + " | ".join(name.capitalize() for name in _SEVERITIES)
-        + " | Confirmed | Unsettled |"
-    )
-    rule = "| --- | " + " | ".join("---" for _ in (*_SEVERITIES, "c", "u")) + " |"
-    lines = [header, rule]
-    if not buckets:
-        lines.append("| None | 0 | 0 | 0 | 0 | 0 | 0 | 0 |")
-        return lines
-    for key in sorted(buckets, key=lambda item: (-sum(buckets[item][name] for name in _SEVERITIES), item)):
-        bucket = buckets[key]
-        cells = " | ".join(str(bucket[name]) for name in _SEVERITIES)
-        lines.append(
-            f"| {_category_label(key)} | {cells} | {bucket['confirmed']} | {bucket['unsettled']} |"
-        )
-    return lines
-
-
-def _index_table(findings: list[Finding]) -> list[str]:
-    lines = [
-        "| # | Severity | Rule | Location | Case |",
-        "| --- | --- | --- | --- | --- |",
-    ]
-    for index, finding in enumerate(findings, start=1):
-        number = finding.number or index
-        rule = finding.advisory_id or finding.rule_id
-        lines.append(
-            f"| {number} | {finding.severity} | {rule} | {finding.file}:{finding.line} | {finding.case_id} |"
-        )
-    return lines
-
-
-def _dropped_section(dropped: list) -> list[str]:
-    lines = ["", f"## Dropped ({len(dropped)})", ""]
-    if not dropped:
-        lines.extend(["None.", ""])
-        return lines
-    reasons = sorted({item.reason for item in dropped})
-    gloss = "; ".join(f"{reason}: {_DROP_GLOSS.get(reason, reason)}" for reason in reasons)
-    lines.extend([gloss, ""])
-    grouped: dict[str, list] = {}
-    for item in dropped:
-        grouped.setdefault(item.reason, []).append(item)
-    for reason in sorted(grouped):
-        lines.append(f"### {reason}")
-        lines.append("")
-        for item in grouped[reason]:
-            lines.append(f"{item.file}:{item.line}  {item.rule_id}  {item.reason}")
-        lines.append("")
-    return lines
-
-
-def _category_label(family: str) -> str:
-    return " ".join(part.capitalize() for part in family.replace("_", "-").split("-"))
+    return finding_markdown(finding, index, repo_name or "repository")
 
 
 def _present(finding: Finding, number: int) -> Finding:
@@ -734,30 +480,6 @@ def _redact_finding(finding: Finding) -> Finding:
     )
 
 
-def _html_finding(finding: Finding, index: int, escape) -> str:
-    number = finding.number or index
-    sections: list[str] = []
-    for label, text in finding_sections(finding):
-        escaped = escape(text)
-        if label == "Evidence":
-            block = f"<pre><code>{escaped}</code></pre>"
-        else:
-            block = "<p>" + escaped.replace("\n", "<br>\n") + "</p>"
-        sections.append(f"<h3>{escape(label)}</h3>{block}")
-    extra = _extra_line(finding)
-    cvss = _cvss_line(finding)
-    meta = "".join(
-        f"<p class='meta'>{escape(line)}</p>" for line in (_identity(finding), cvss, extra) if line
-    )
-    return (
-        f"<article class='gap {escape(finding.severity)}' id='finding-{number}'>"
-        f"<h2>Finding {number}: {escape(finding.title)}</h2>"
-        f"{meta}"
-        + "".join(sections)
-        + "</article>"
-    )
-
-
 _PROSE = frozenset({"summary", "advisory_note", "description", "remediation", "snippet", "threat_note"})
 
 
@@ -827,175 +549,17 @@ def _normalize_formats(formats: set[str] | None) -> set[str]:
 def render_html(report: FinalReport) -> str:
     """One self-contained HTML file. It loads nothing from the network."""
 
-    from html import escape
+    from silentblue.reading import render_html as _render
 
-    metrics = report.metrics
-    rows = [_html_finding(finding, index, escape) for index, finding in enumerate(report.findings, start=1)]
-    body = "\n".join(rows) or "<p>No control gaps were reported.</p>"
-    actual_known = metrics.usage_known and metrics.rate_known
-    review = metrics.model_review or "not run"
-    index_rows = []
-    for index, finding in enumerate(report.findings, start=1):
-        number = finding.number or index
-        rule = finding.advisory_id or finding.rule_id
-        index_rows.append(
-            "<tr>"
-            f"<td><a href='#finding-{number}'>{number}</a></td>"
-            f"<td>{escape(finding.severity)}</td>"
-            f"<td>{escape(rule)}</td>"
-            f"<td>{escape(finding.file)}:{finding.line}</td>"
-            f"<td>{escape(finding.case_id)}</td>"
-            "</tr>"
-        )
-    index = (
-        "<table><thead><tr><th>#</th><th>Severity</th><th>Rule</th><th>Location</th><th>Case</th></tr></thead>"
-        f"<tbody>{''.join(index_rows) or '<tr><td colspan=5>None</td></tr>'}</tbody></table>"
-    )
-    cost = ""
-    if metrics.model_calls:
-        cost = (
-            "<p>Cost: estimated "
-            f"{escape(format_usd(metrics.estimated_cost_usd, metrics.rate_known))} USD, actual "
-            f"{escape(format_usd(metrics.actual_cost_usd, actual_known))} USD, "
-            f"{metrics.model_calls} model calls.</p>"
-        )
-    else:
-        cost = (
-            "<p>Estimated cost USD "
-            f"{escape(format_usd(metrics.estimated_cost_usd, metrics.rate_known))}.</p>"
-        )
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Control gap report {escape(report.repo_name)}</title>
-<style>
-body {{ font: 15px/1.45 system-ui, sans-serif; margin: 2rem auto; max-width: 72rem; color: #1c1917; background: #fff; font-variant-numeric: tabular-nums; }}
-h1 {{ font-size: 1.5rem; font-weight: 600; }}
-table {{ border-collapse: collapse; width: 100%; margin: 0.6rem 0 1.2rem; }}
-th, td {{ text-align: left; padding: 0.25rem 0.6rem; border-bottom: 1px solid #e7e5e4; }}
-.gap {{ border: 1px solid #e7e5e4; border-left-width: 4px; padding: 1rem 1.2rem; margin: 1rem 0; }}
-.critical {{ border-left-color: #7f1d1d; }}
-.high {{ border-left-color: #9a3412; }}
-.medium {{ border-left-color: #a16207; }}
-.low, .info {{ border-left-color: #57534e; }}
-.meta {{ margin: 0.15rem 0; color: #44403c; }}
-h3 {{ font-size: 0.95rem; margin: 0.9rem 0 0.3rem; }}
-pre {{ white-space: pre-wrap; background: #f5f5f4; padding: 0.6rem; }}
-@media print {{
-  body {{ margin: 0.5in; }}
-  .gap {{ break-inside: avoid; }}
-  a {{ color: inherit; text-decoration: none; }}
-}}
-</style>
-</head>
-<body>
-<h1>Control gap report</h1>
-<p>{escape(report.repo_name)} · {escape(report.profile)} · silentblue {escape(report.version)} · {escape(report.generated_at)} · schema {escape(report.schema_version)}</p>
-<p>Advisories {escape(report.advisories)} · threat model {escape(report.threat_model)} · model review {escape(review)}</p>
-{cost}
-<h2>Index</h2>
-{index}
-{body}
-<h2>Record</h2>
-<p>{escape(report.summary)}</p>
-</body>
-</html>
-"""
+    return _render(report)
 
 
 def render_pdf(report: FinalReport) -> bytes:
-    """A text PDF of the Markdown, with a running header and a page number."""
+    """Pages drawn from the same sections as the HTML assessment."""
 
-    lines = _wrap(render_markdown(report).splitlines(), 90)
-    pages = [lines[index : index + 44] for index in range(0, len(lines), 44)] or [[""]]
-    return _pdf_document(pages, report.repo_name)
+    from silentblue.reading import render_pdf as _render
 
-
-def _wrap(lines: list[str], width: int) -> list[str]:
-    wrapped: list[str] = []
-    for line in lines:
-        text = line.replace("\t", "    ")
-        if not text:
-            wrapped.append("")
-            continue
-        while len(text) > width:
-            wrapped.append(text[:width])
-            text = text[width:]
-        wrapped.append(text)
-    return wrapped
-
-
-def _pdf_document(pages: list[list[str]], repo_name: str) -> bytes:
-    objects: list[bytes] = []
-
-    def add(body: bytes) -> int:
-        objects.append(body)
-        return len(objects)
-
-    font = add(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    page_ids: list[int] = []
-    content_ids: list[int] = []
-    total = len(pages)
-    for number, lines in enumerate(pages, start=1):
-        content_ids.append(add(_page_stream(lines, f"{repo_name}  {number} / {total}")))
-    for content_id in content_ids:
-        page_ids.append(
-            add(
-                b"<< /Type /Page /Parent 0 0 R /MediaBox [0 0 612 792] "
-                + f"/Contents {content_id} 0 R /Resources << /Font << /F1 {font} 0 R >> >> >>".encode()
-            )
-        )
-    kids = " ".join(f"{page_id} 0 R" for page_id in page_ids)
-    pages_id = add(f"<< /Type /Pages /Count {len(page_ids)} /Kids [{kids}] >>".encode())
-    for index, page_id in enumerate(page_ids):
-        objects[page_id - 1] = objects[page_id - 1].replace(b"/Parent 0 0 R", f"/Parent {pages_id} 0 R".encode())
-    catalog = add(f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode())
-    return _serialize(objects, catalog)
-
-
-def _page_stream(lines: list[str], header: str) -> bytes:
-    commands = [
-        "BT",
-        "/F1 9 Tf",
-        "50 770 Td",
-        f"({_pdf_escape(header)}) Tj",
-        "0 -22 Td",
-        "/F1 11 Tf",
-        "14 TL",
-    ]
-    for line in lines:
-        commands.append(f"({_pdf_escape(line)}) Tj")
-        commands.append("T*")
-    commands.append("ET")
-    stream = "\n".join(commands).encode("latin-1", errors="replace")
-    return b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
-
-
-def _pdf_escape(text: str) -> str:
-    encoded = text.encode("latin-1", errors="replace").decode("latin-1")
-    return encoded.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-
-def _serialize(objects: list[bytes], root: int) -> bytes:
-    header = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"
-    chunks = [header]
-    offsets = [0]
-    cursor = len(header)
-    for number, body in enumerate(objects, start=1):
-        offsets.append(cursor)
-        piece = f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
-        chunks.append(piece)
-        cursor += len(piece)
-    xref_at = cursor
-    xref = [f"xref\n0 {len(objects) + 1}\n".encode(), b"0000000000 65535 f \n"]
-    for offset in offsets[1:]:
-        xref.append(f"{offset:010d} 00000 n \n".encode())
-    trailer = (
-        f"trailer\n<< /Size {len(objects) + 1} /Root {root} 0 R >>\n"
-        f"startxref\n{xref_at}\n%%EOF\n"
-    ).encode()
-    return b"".join([*chunks, *xref, trailer])
+    return _render(report)
 
 
 def _atomic_write(path: Path, text: str) -> None:

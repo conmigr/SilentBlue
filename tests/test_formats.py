@@ -56,26 +56,37 @@ def test_html_escapes_text_and_states_the_cost():
     html = render_html(_report())
     assert "SQL &lt;built&gt;" in html
     assert "<script" not in html
-    assert "Estimated cost USD 0.0000." in html
-    assert "high · sql-unparameterized · app.py:2" in html
-    assert "<h3>Description</h3>" in html
-    assert "<h3>Evidence</h3>" in html
-    assert "<h3>Remediation</h3>" in html
-    assert "CVSS." not in html
+    assert "The estimated cost is 0.0000 USD." in html
+    assert "SilentBlue sample Assessment" in html
+    assert "sam-1" in html
+    assert "rule sql-unparameterized, at app.py:2" in html
+    assert "<strong>Description:</strong>" in html
+    assert "<strong>Why it matters:</strong>" in html
+    assert "<strong>Impact:</strong>" in html
+    assert "<strong>Evidence:</strong>" in html
+    assert "<strong>Remediation:</strong>" in html
+    assert "#4f7db0" in html
+    assert "#e8f0f7" in html
+    assert "SilentBlue version 0.5.0 Assessment 2026-11-18" in html
     assert "http://" not in html
     assert "https://" not in html
 
 
 def test_markdown_uses_labeled_findings():
     markdown = render_markdown(_report())
-    assert "## Finding 1: SQL <built>" in markdown
-    assert "high · sql-unparameterized · app.py:2" in markdown
-    assert "## Result" in markdown
+    assert "# SilentBlue sample Assessment" in markdown
+    assert "## sam-1" in markdown
+    assert "SQL <built>" in markdown
+    assert "## Summary" in markdown
     assert "## Index" in markdown
-    assert "### Record" in markdown
-    assert "Description:\nThe query is assembled." in markdown
+    assert "| **#** | **Severity** | **CVSS** | **Rule** | **Title** |" in markdown
+    assert "## Record" in markdown
+    assert "**Description:** The query is assembled." in markdown
+    assert "**Why it matters:**" in markdown
+    assert "**Impact:**" in markdown
     assert "```app.py\nconn.execute" in markdown
-    assert "Remediation:\nUse a bound parameter." in markdown
+    assert "**Remediation:** Use a bound parameter." in markdown
+    assert "SilentBlue version 0.5.0 Assessment 2026-11-18" in markdown
     assert "Findings are candidates" not in markdown
 
 
@@ -84,6 +95,10 @@ def test_pdf_is_a_real_document():
     assert payload.startswith(b"%PDF-1.4")
     assert b"%%EOF" in payload
     assert b"sql-unparameterized" in payload
+    assert b"Helvetica-Bold" in payload
+    assert b"Courier" in payload
+    assert b"SilentBlue sample Assessment" in payload
+    assert b"SilentBlue version 0.5.0 Assessment 2026-11-18" in payload
 
 
 def test_format_selection_writes_only_the_requested_files(tmp_path):

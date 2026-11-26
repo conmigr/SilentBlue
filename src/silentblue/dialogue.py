@@ -156,6 +156,7 @@ _MISSION_PATTERNS = (
     re.compile(r"do not (?:write|record)\s+(?:the\s+)?findings"),
 )
 _CASE = re.compile(r"^sb1_[0-9a-f]{32}$")
+_DISPLAY_ID = re.compile(r"^[a-z]{1,3}-\d{1,6}$")
 _CATEGORY_NAME = re.compile(r"[a-z0-9][a-z0-9 _-]*")
 _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _TRIAGE_ACCEPT = re.compile(
@@ -298,6 +299,11 @@ def _slash(raw: str, lowered: str) -> Decision | None:
         return None
     if lowered in _COMMANDS:
         return Decision("tool", command=lowered)
+    if lowered == "/help" or lowered.startswith("/help "):
+        topic = lowered[5:].strip()
+        if topic in {"", "scan", "findings", "model"}:
+            return Decision("tool", command="/help" if not topic else f"/help {topic}")
+        return Decision("refuse", reason="tool")
     if lowered.startswith("/skill "):
         name = lowered.split(None, 1)[1].strip()
         if _SKILL_NAME.fullmatch(name):
@@ -326,7 +332,7 @@ def _slash(raw: str, lowered: str) -> Decision | None:
         return Decision("refuse", reason="tool")
     if lowered.startswith("/finding "):
         token = raw.split(None, 1)[1].strip()
-        if token.isdigit() or _CASE.fullmatch(token):
+        if token.isdigit() or _CASE.fullmatch(token) or _DISPLAY_ID.fullmatch(token.lower()):
             return Decision("tool", command=f"/finding {token}")
         return Decision("refuse", reason="tool")
     if lowered.startswith("/model assume "):
@@ -383,7 +389,7 @@ def _finding(content: str) -> str | None:
     if len(parts) != 2 or not _near(parts[0], "finding"):
         return None
     token = parts[1]
-    if token.isdigit() or _CASE.fullmatch(token):
+    if token.isdigit() or _CASE.fullmatch(token) or _DISPLAY_ID.fullmatch(token):
         return token
     return None
 
@@ -474,6 +480,9 @@ def _skill_request(content: str) -> Decision | None:
 def _allowed(command: str) -> bool:
     if command in _COMMANDS:
         return True
+    if command == "/help" or command.startswith("/help "):
+        topic = command[5:].strip()
+        return topic in {"", "scan", "findings", "model"}
     if command.startswith("/skill "):
         name = command.split(None, 1)[1].strip()
         return _SKILL_NAME.fullmatch(name) is not None
@@ -486,7 +495,7 @@ def _allowed(command: str) -> bool:
         return bool(name) and len(name) <= 80 and _CATEGORY_NAME.fullmatch(name) is not None
     if command.startswith("/finding "):
         token = command.split(None, 1)[1]
-        return token.isdigit() or _CASE.fullmatch(token) is not None
+        return token.isdigit() or _CASE.fullmatch(token) is not None or _DISPLAY_ID.fullmatch(token.lower()) is not None
     if command.startswith("/model assume "):
         text = command.split(None, 2)[2].strip()
         return bool(text) and len(text) <= 400 and "\n" not in text
