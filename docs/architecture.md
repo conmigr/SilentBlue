@@ -1,6 +1,6 @@
 # Architecture
 
-Silent Blue 0.9.2 turns a source repository into a control-gap report. The detect profile is deterministic. The assess profile adds a model review of a file list written before the first model call. Markdown, SARIF 2.1.0, HTML, PDF, and `findings.json` are rendered from one typed `FinalReport`. YAML is the same object and is written only when requested. `remediate` and `validate` run after that report.
+Silent Blue 0.9.3 turns a source repository into a control-gap report. The detect profile is deterministic. The assess profile adds a model review of a file list written before the first model call. Markdown, SARIF 2.1.0, HTML, PDF, and `findings.json` are rendered from one typed `FinalReport`. YAML is the same object and is written only when requested. `remediate` and `validate` run after that report.
 
 ## Stages
 
