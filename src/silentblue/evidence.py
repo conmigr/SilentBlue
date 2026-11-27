@@ -250,7 +250,10 @@ def _template(first: str) -> str:
 def _doc_lines(lines: list[str]) -> list[bool]:
     """True when the line is inside a quote, so a sample statement is not a call."""
 
-    masks = literal_masks("\n".join(lines))
+    text = "\n".join(lines)
+    if lines and lines[-1] == "":
+        text += "\n"
+    masks = literal_masks(text)
     marked: list[bool] = []
     for line, mask in zip(lines, masks):
         exposed = [char for char, hidden in zip(line, mask) if not hidden and char.strip()]

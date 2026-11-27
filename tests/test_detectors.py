@@ -66,6 +66,19 @@ def test_a_document_closes_the_call_and_keeps_a_live_secret(tmp_path):
     assert any(item.reason == "document" and item.rule_id == "tls-verify-disabled" for item in dropped)
 
 
+def test_a_trailing_blank_line_keeps_the_sql_line_number(tmp_path):
+    source = "\n".join(
+        [
+            "def read(conn, name):",
+            '    conn.execute("SELECT " + name)',
+            "",
+        ]
+    )
+    source += "\n"
+    findings = _scan(tmp_path, ".env.template", source)
+    assert [(finding.rule_id, finding.line) for finding in findings] == [("sql-unparameterized", 2)]
+
+
 def test_parameterized_sql_and_comments_are_quiet(tmp_path):
     findings = _scan(
         tmp_path,
