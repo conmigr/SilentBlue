@@ -19,7 +19,8 @@ def test_sdk_scan_is_detect_and_makes_no_model_calls(workspace):
         state_dir=workspace["state"],
         manifest_dir=workspace["manifests"],
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "release gate:" in result.message
     assert result.finding_count == 1
     assert result.findings_path is not None
     report = json.loads(Path(result.findings_path).read_text(encoding="utf-8"))

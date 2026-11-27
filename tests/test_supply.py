@@ -49,10 +49,14 @@ def test_every_rule_vector_matches_its_score():
 
 def test_exact_pins_stay_quiet_and_ranges_are_flagged(tmp_path):
     assert "dependency-unpinned" not in _rules(tmp_path, "requirements.txt", "requests==2.32.3\n")
+    assert "dependency-unpinned" not in _rules(tmp_path, "requirements.txt", "requests>=2.6,<3\n")
+    assert "dependency-unpinned" not in _rules(tmp_path, "requirements.txt", "requests~=2.32\n")
     assert _rules(tmp_path, "requirements.txt", "requests>=2\n") == {"dependency-unpinned"}
     package = json.dumps({"dependencies": {"left-pad": "1.2.3"}})
     assert "dependency-unpinned" not in _rules(tmp_path, "package.json", package)
-    ranged = json.dumps({"dependencies": {"left-pad": "^1.2.3"}})
+    ceiling = json.dumps({"dependencies": {"left-pad": "^1.2.3"}})
+    assert "dependency-unpinned" not in _rules(tmp_path, "package.json", ceiling)
+    ranged = json.dumps({"dependencies": {"left-pad": ">=1.2.3"}})
     assert _rules(tmp_path, "package.json", ranged) == {"dependency-unpinned"}
 
 
@@ -65,12 +69,19 @@ def test_lockfile_suppresses_the_pin_finding(tmp_path):
         {"poetry.lock": poetry},
     )
     lock = json.dumps({"packages": {"node_modules/left-pad": {"version": "1.2.3"}}})
-    ranged = json.dumps({"dependencies": {"left-pad": "^1.2.3"}})
+    ranged = json.dumps({"dependencies": {"left-pad": ">=1.2.3"}})
     assert "dependency-unpinned" not in _rules(
         tmp_path,
         "package.json",
         ranged,
         {"package-lock.json": lock},
+    )
+    uv = '[[package]]\nname = "requests"\nversion = "2.32.3"\n'
+    assert "dependency-unpinned" not in _rules(
+        tmp_path,
+        "pkg/requirements.txt",
+        "requests>=2\n",
+        {"pkg/uv.lock": uv},
     )
 
 
@@ -218,7 +229,8 @@ def test_osv_fills_cvss_and_a_failed_query_exits_1(workspace, monkeypatch):
         osv=True,
         advisory_fetch=fetch,
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "release gate:" in result.message
     report = json.loads((repo / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert report["schema_version"] == "1.1"
     assert report["advisories"] == "queried"
@@ -276,7 +288,8 @@ def test_unpinned_packages_are_not_sent(workspace, monkeypatch):
         osv=True,
         advisory_fetch=fetch,
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "release gate:" in result.message
     report = json.loads((repo / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert report["advisories"] == "queried"
     assert any(item["rule_id"] == "dependency-unpinned" for item in report["findings"])
@@ -310,7 +323,8 @@ def test_opening_scan_keeps_osv_rows_when_the_packages_match(workspace, monkeypa
         osv=True,
         advisory_fetch=_advisory_fetch,
     )
-    assert queried.exit_code == 0
+    assert queried.exit_code == 1
+    assert "release gate:" in queried.message
     stored = json.loads((repo / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert len(stored["advisory_fingerprint"]) == 64
     kept = run_scan(
@@ -319,7 +333,8 @@ def test_opening_scan_keeps_osv_rows_when_the_packages_match(workspace, monkeypa
         manifest_dir=workspace["manifests"],
         retain_advisories=True,
     )
-    assert kept.exit_code == 0
+    assert kept.exit_code == 1
+    assert "release gate:" in kept.message
     assert "Kept from the last OSV query" in kept.message
     report = json.loads((repo / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert report["advisories"] == "queried"

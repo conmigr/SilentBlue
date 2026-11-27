@@ -10,6 +10,14 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from silentblue.errors import UsageError
+from silentblue.evidence import (
+    fixture_secret,
+    is_document,
+    literal_masks,
+    live_secret,
+    quote_only,
+    sql_clusters,
+)
 from silentblue.graph import build_graph
 from silentblue.models import (
     CASE_ID,
@@ -22,6 +30,7 @@ from silentblue.models import (
 from silentblue.paths import is_reparse_point, is_within
 from silentblue.playbooks import PLAYBOOKS, Playbook, playbook_for
 from silentblue.rank import case_id_for
+from silentblue.roles import path_role
 from silentblue.reviewlist import build_review_list, save_reply, save_review_list
 from silentblue.scope import is_source_path
 from silentblue.redact import redact
@@ -167,13 +176,16 @@ def run_d3(state: RunState, ctx: StageContext) -> RunState:
 
 
 def run_d4(state: RunState, ctx: StageContext) -> RunState:
-    """Read each unit once. A cited line is kept. A bad reply does not delete a finding."""
+    """Read each unit. A bad reply is retried once. A cited line is kept."""
 
     findings = list(state.findings)
     dropped = list(state.dropped)
     reviewed = list(state.reviewed_units)
+    review_skips = dict(state.review_skips)
+    review_stop = state.review_stop
     done = set(reviewed)
     pending = [unit for unit in state.units if unit.unit_id not in done]
+    pending_by_id = {unit.unit_id: unit for unit in pending}
     repo = Path(state.repo)
     carried = [
         item
@@ -194,10 +206,10 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
         model_calls=ctx.model_calls,
     )
 
-    def worker(unit: WorkUnit) -> tuple[str, list[Finding], list[DroppedFinding], list[str], list[str], bool]:
+    def worker(unit: WorkUnit) -> tuple[str, list[Finding], list[DroppedFinding], list[str], list[str], str]:
         return _review_unit(repo, unit, ctx, carried, known_rows, state.run_id)
 
-    for unit_id, found, lost, cleared, confirmed, keep in _map_work(ctx, pending, worker):
+    for unit_id, found, lost, cleared, confirmed, status in _map_work(ctx, pending, worker):
         if cleared:
             gone = set(cleared)
             for item in findings:
@@ -219,14 +231,28 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
                 findings.append(item)
                 present.add(key)
         dropped.extend(lost)
-        if keep:
+        if status == "read":
             reviewed.append(unit_id)
+        elif status == "budget":
+            if ctx.stop_event is not None and ctx.stop_event.is_set():
+                review_stop = "owner"
+            elif review_stop != "owner":
+                review_stop = "budget"
+        elif status.startswith("skipped:"):
+            reviewed.append(unit_id)
+            reason = status.split(":", 1)[1].strip() or "unparsed"
+            unit = pending_by_id.get(unit_id)
+            if unit is not None:
+                for path in unit.paths:
+                    review_skips[path] = reason
         state = ctx.stamp(
             state.model_copy(
                 update={
                     "findings": findings,
                     "dropped": dropped,
                     "reviewed_units": reviewed,
+                    "review_skips": review_skips,
+                    "review_stop": review_stop,
                     "cleared_keys": cleared_keys,
                 }
             )
@@ -240,6 +266,8 @@ def run_d4(state: RunState, ctx: StageContext) -> RunState:
                 "findings": findings,
                 "dropped": dropped,
                 "reviewed_units": reviewed,
+                "review_skips": review_skips,
+                "review_stop": review_stop,
                 "cleared_keys": cleared_keys,
             }
         )
@@ -273,8 +301,22 @@ def bind_assessment(
 
 
 def run_d6(state: RunState, ctx: StageContext) -> RunState:
-    """Leave model findings in place. Clearing happens in the same review call."""
+    """Refute open rows, then look for gaps the detectors cannot see.
 
+    Both passes wait until every review path was read. A live secret and a
+    specimen are not sent to the critic.
+    """
+
+    if not state.review_paths:
+        return ctx.stamp(state)
+    if set(state.review_paths) != set(_successfully_read(state)):
+        return ctx.stamp(
+            state.model_copy(update={"refute_status": "not_started", "miss_status": "not_started"})
+        )
+    state = _refute_open(state, ctx, None)
+    if state.refute_status != "finished":
+        return ctx.stamp(state.model_copy(update={"miss_status": "not_started"}))
+    state = _miss_clean(state, ctx)
     return ctx.stamp(state)
 
 
@@ -318,18 +360,48 @@ def _review_unit(
     carried: list[Finding],
     known_rows: list[Finding],
     run_id: str,
-) -> tuple[str, list[Finding], list[DroppedFinding], list[str], list[str], bool]:
-    found: list[Finding] = []
-    lost: list[DroppedFinding] = []
+) -> tuple[str, list[Finding], list[DroppedFinding], list[str], list[str], str]:
     excerpts = _excerpts(repo, unit.paths, ctx.config.budgets.max_excerpt_bytes)
     if not excerpts:
-        return unit.unit_id, found, lost, [], [], False
-    user = _review_prompt(repo, unit, ctx, carried, known_rows, excerpts)
+        return unit.unit_id, [], [], [], [], "skipped:no excerpt"
+    found, lost, cleared, confirmed, status = _one_review(
+        repo, unit, ctx, carried, known_rows, run_id
+    )
+    if status in {"read", "budget"}:
+        return unit.unit_id, found, lost, cleared, confirmed, status
+    found, lost, cleared, confirmed, status = _one_review(
+        repo, unit, ctx, carried, known_rows, run_id
+    )
+    if status == "read":
+        return unit.unit_id, found, lost, cleared, confirmed, "read"
+    if status == "budget":
+        return unit.unit_id, found, lost, cleared, confirmed, "budget"
+    reason = "unparsed" if status == "unparsed" else "call failed"
+    return unit.unit_id, [], [], [], [], f"skipped:{reason}"
+
+
+def _one_review(
+    repo: Path,
+    unit: WorkUnit,
+    ctx: StageContext,
+    carried: list[Finding],
+    known_rows: list[Finding],
+    run_id: str,
+) -> tuple[list[Finding], list[DroppedFinding], list[str], list[str], str]:
+    found: list[Finding] = []
+    lost: list[DroppedFinding] = []
+    if ctx.should_stop():
+        return found, lost, [], [], "budget"
+    user = _review_prompt(repo, unit, ctx, carried, known_rows, _excerpts(repo, unit.paths, ctx.config.budgets.max_excerpt_bytes))
     raw = ctx.complete(_SYSTEM, user)
     _store_reply(ctx, repo, run_id, raw if raw is not None else "(no reply)")
+    if raw is None:
+        if getattr(ctx._local, "refused", False) or ctx.budget_exhausted:
+            return found, lost, [], [], "budget"
+        return found, lost, [], [], "failed"
     parsed = _read_review(raw)
     if parsed is None:
-        return unit.unit_id, found, lost, [], [], False
+        return found, lost, [], [], "unparsed"
     observations, clears, confirms = parsed
     for item in observations:
         finding = _observation_to_finding(repo, unit, item)
@@ -346,7 +418,240 @@ def _review_unit(
         found.append(finding)
     cleared = _cleared_ids(repo, unit, carried, clears)
     confirmed = _cleared_ids(repo, unit, carried, confirms)
-    return unit.unit_id, found, lost, cleared, confirmed, True
+    return found, lost, cleared, confirmed, "read"
+
+
+_CLOSE_REASONS = frozenset(
+    {"mentioned", "fixture", "document", "not_a_sink", "bound_parameter", "fixed_clause"}
+)
+
+
+def _successfully_read(state: RunState) -> list[str]:
+    reviewed = set(state.reviewed_units)
+    skipped = set(state.review_skips)
+    listed = set(state.review_paths)
+    seen: list[str] = []
+    for unit in state.units:
+        if unit.unit_id not in reviewed:
+            continue
+        for path in unit.paths:
+            if path in listed and path not in skipped and path not in seen:
+                seen.append(path)
+    return seen
+
+
+def _refute_open(state: RunState, ctx: StageContext, only: set[tuple[str, int, str]] | None) -> RunState:
+    """One critic call per eligible row. A close sticks only when the evidence bar agrees."""
+
+    repo = Path(state.repo)
+    findings = list(state.findings)
+    dropped = list(state.dropped)
+    for finding in list(findings):
+        key = (finding.file, finding.line, finding.rule_id)
+        if only is not None and key not in only:
+            continue
+        if not _refutable(finding):
+            continue
+        if ctx.should_stop():
+            return _stamped(ctx, findings, dropped, state, refute="stopped")
+        raw = ctx.complete(_SYSTEM, _refute_prompt(finding))
+        _store_reply(ctx, repo, state.run_id, raw if raw is not None else "(no reply)")
+        if raw is None:
+            if getattr(ctx._local, "refused", False) or ctx.budget_exhausted or ctx.should_stop():
+                return _stamped(ctx, findings, dropped, state, refute="stopped")
+            continue
+        decision = _read_refute(raw)
+        if decision is None or decision[0] != "close":
+            continue
+        _action, reason, span = decision
+        if not _agrees(repo, finding, reason, span):
+            continue
+        findings = [item for item in findings if (item.file, item.line, item.rule_id) != key]
+        dropped.append(DroppedFinding(rule_id=finding.rule_id, file=finding.file, line=finding.line, reason=reason))
+    return _stamped(ctx, findings, dropped, state, refute="finished")
+
+
+def _miss_clean(state: RunState, ctx: StageContext) -> RunState:
+    """One pass over clean product files the review actually read."""
+
+    repo = Path(state.repo)
+    dirty = {finding.file for finding in state.findings}
+    clean = [path for path in _successfully_read(state) if path_role(path) == "product" and path not in dirty]
+    if not clean:
+        return state.model_copy(update={"miss_status": "finished"})
+    findings = list(state.findings)
+    dropped = list(state.dropped)
+    added: list[tuple[str, int, str]] = []
+    per_unit = max(1, ctx.config.budgets.max_files_per_unit)
+    for start in range(0, len(clean), per_unit):
+        if ctx.should_stop():
+            state = _stamped(ctx, findings, dropped, state, miss="stopped")
+            return state
+        chunk = clean[start : start + per_unit]
+        unit = WorkUnit(
+            unit_id=f"miss{start}",
+            control_family="review",
+            title="Missed controls",
+            paths=chunk,
+        )
+        raw = ctx.complete(_SYSTEM, _miss_prompt(repo, chunk, ctx.config.budgets.max_excerpt_bytes))
+        _store_reply(ctx, repo, state.run_id, raw if raw is not None else "(no reply)")
+        if raw is None:
+            if getattr(ctx._local, "refused", False) or ctx.budget_exhausted or ctx.should_stop():
+                return _stamped(ctx, findings, dropped, state, miss="stopped")
+            continue
+        parsed = _read_review(raw)
+        if parsed is None:
+            continue
+        observations, _clears, _confirms = parsed
+        present = {(item.file, item.line, item.rule_id) for item in findings}
+        for item in observations:
+            finding = _observation_to_finding(repo, unit, item)
+            if finding is None:
+                continue
+            key = (finding.file, finding.line, finding.rule_id)
+            if key in present:
+                continue
+            findings.append(finding)
+            present.add(key)
+            added.append(key)
+    state = _stamped(ctx, findings, dropped, state, miss="finished")
+    if not added:
+        return state
+    judged = _refute_open(state, ctx, set(added))
+    if judged.refute_status == "stopped":
+        return judged.model_copy(update={"refute_status": "finished", "miss_status": "stopped"})
+    return judged.model_copy(update={"miss_status": "finished"})
+
+
+def _stamped(
+    ctx: StageContext,
+    findings: list[Finding],
+    dropped: list[DroppedFinding],
+    state: RunState,
+    *,
+    refute: str = "",
+    miss: str = "",
+) -> RunState:
+    update: dict[str, object] = {"findings": findings, "dropped": dropped}
+    if refute:
+        update["refute_status"] = refute
+    if miss:
+        update["miss_status"] = miss
+    return ctx.stamp(state.model_copy(update=update))
+
+
+def _refutable(finding: Finding) -> bool:
+    if finding.rule_id in {"hardcoded-secret", "dependency-vulnerable"}:
+        return False
+    if path_role(finding.file) == "specimen":
+        return False
+    return True
+
+
+def _refute_prompt(finding: Finding) -> str:
+    return (
+        f"Judge one open row. case {finding.case_id} "
+        f"rule {finding.rule_id} at {finding.file}:{finding.line}. "
+        f"Role {path_role(finding.file)}. "
+        "Return one JSON object and nothing else. "
+        '{"keep": true} when the line is a real control gap. '
+        '{"close": "mentioned", "span": "<text on that line>"} when an evidence close applies. '
+        "close is one of mentioned, fixture, document, not_a_sink, bound_parameter, fixed_clause. "
+        "The span must be copied from the line. "
+        "Do not close a live credential. Do not include a proof-of-concept.\n"
+        f"Line: {finding.snippet}"
+    )
+
+
+def _miss_prompt(repo: Path, paths: list[str], max_bytes: int) -> str:
+    excerpts = _excerpts(repo, paths, max_bytes)
+    return (
+        "These product files were read and the detectors reported nothing on them. "
+        "Name a missing control the line patterns cannot see, with file and line, "
+        "or return an empty observations array. "
+        "Do not include a proof-of-concept or a payload.\n"
+        f"{excerpts}\n\n"
+        'Return one JSON object {"observations": [{"file", "line", "category", "impact", "recommendation"}]}.'
+    )
+
+
+def _read_refute(raw: str | None) -> tuple[str, str, str] | None:
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        data = _parse_json_object(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("keep") is True:
+        return ("keep", "", "")
+    reason = str(data.get("close") or "").strip()
+    span = str(data.get("span") or "")
+    if reason:
+        return ("close", reason, span)
+    return None
+
+
+def _agrees(repo: Path, finding: Finding, reason: str, span: str) -> bool:
+    """The critic's close is kept only when the evidence bar names the same reason."""
+
+    if reason not in _CLOSE_REASONS or not span.strip():
+        return False
+    raw = _raw_line(repo, finding.file, finding.line)
+    if raw is None or span not in raw:
+        return False
+    if reason == "document":
+        return is_document(finding.file) and finding.rule_id != "hardcoded-secret"
+    if reason == "fixture":
+        return finding.rule_id == "hardcoded-secret" and not live_secret(raw) and fixture_secret(span)
+    if reason == "mentioned":
+        from silentblue.detectors import _mention_table
+
+        patterns = _mention_table().get(finding.rule_id, ())
+        text = _raw_text(repo, finding.file)
+        if not patterns or text is None:
+            return False
+        masks = literal_masks(text)
+        if finding.line < 1 or finding.line > len(masks):
+            return False
+        return quote_only(raw, masks[finding.line - 1], patterns)
+    text = _raw_text(repo, finding.file)
+    if text is None:
+        return False
+    for cluster in sql_clusters(finding.file, text):
+        lines = {cluster.line, *cluster.also_at}
+        if finding.line in lines and cluster.status == "closed" and cluster.reason == reason:
+            return True
+    return False
+
+
+def _raw_line(repo: Path, relative: str, line: int) -> str | None:
+    path = repo / relative
+    if not is_within(repo, path) or is_reparse_point(path):
+        return None
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for number, content in enumerate(handle, start=1):
+                if number != line:
+                    continue
+                if "\0" in content:
+                    return None
+                return content.rstrip("\n\r")
+    except OSError:
+        return None
+    return None
+
+
+def _raw_text(repo: Path, relative: str) -> str | None:
+    path = repo / relative
+    if not is_within(repo, path) or is_reparse_point(path):
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
 
 
 def _state_dir(ctx: StageContext) -> Path:

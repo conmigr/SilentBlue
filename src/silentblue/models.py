@@ -91,6 +91,8 @@ class Finding(BaseModel):
     cvss_version: str = ""
     advisory_id: str = ""
     component: ComponentDetail | None = None
+    role: Literal["", "product", "test", "specimen", "docs"] = ""
+    owner_confirm: Literal["", "recorded", "stale"] = ""
 
 
 class DroppedFinding(BaseModel):
@@ -154,6 +156,7 @@ class CoverageRow(BaseModel):
     language: str = ""
     families: list[str] = Field(default_factory=list)
     reason: str = ""
+    model_state: str = ""
 
 
 class CoverageLedger(BaseModel):
@@ -162,8 +165,12 @@ class CoverageLedger(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     saturated: bool = False
+    model_saturated: bool = False
     rows: list[CoverageRow] = Field(default_factory=list)
     unread: list[str] = Field(default_factory=list)
+    stop: str = ""
+    refute: str = ""
+    miss: str = ""
 
 
 class ContextPackage(BaseModel):
@@ -238,6 +245,10 @@ class RunState(BaseModel):
     advisory_fingerprint: str = ""
     review_paths: list[str] = Field(default_factory=list)
     review_note: str = ""
+    review_skips: dict[str, str] = Field(default_factory=dict)
+    review_stop: str = ""
+    refute_status: str = ""
+    miss_status: str = ""
     cleared_keys: list[str] = Field(default_factory=list)
 
 

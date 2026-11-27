@@ -56,7 +56,8 @@ def test_a_model_finding_stays_until_a_real_line_clears_it(workspace):
         profile="assess",
         client=Once(json.dumps(observation)),
     )
-    assert first.exit_code == 0
+    assert first.exit_code == 1
+    assert "release gate:" in first.message
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     kept = [item for item in report["findings"] if item["origin"] == "assessment"]
     assert len(kept) == 1
@@ -79,7 +80,8 @@ def test_a_model_finding_stays_until_a_real_line_clears_it(workspace):
         profile="assess",
         client=Hold(),
     )
-    assert second.exit_code == 0
+    assert second.exit_code == 1
+    assert "release gate:" in second.message
     again = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     still = [item for item in again["findings"] if item["origin"] == "assessment"]
     assert [item["case_id"] for item in still] == [case_id]

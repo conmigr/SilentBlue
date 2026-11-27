@@ -28,7 +28,8 @@ def test_batch_scans_each_repo_and_records_failures(workspace):
     assert result.exit_code == 1
     assert result.model_calls == 0
     assert len(result.repos) == 2
-    assert result.repos[0].exit_code == 0
+    assert result.repos[0].exit_code == 1
+    assert "release gate:" in result.repos[0].message
     assert result.repos[0].finding_count == 1
     assert result.repos[0].model_calls == 0
     assert result.repos[1].exit_code == 2

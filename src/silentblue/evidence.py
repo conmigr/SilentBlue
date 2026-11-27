@@ -144,7 +144,11 @@ def _sql_line(line: str, *, in_doc: bool) -> tuple[str | None, str, str]:
     if not _ASSEMBLY.search(line):
         return None, "", ""
     code = _STRING.sub("''", line)
-    if in_doc or (_PRINT.search(code) and _BARE_EXEC.search(code) is None and ".execute" not in code.lower()):
+    if in_doc:
+        if _looks_like_query(line):
+            return "closed", "mentioned", ""
+        return None, "", ""
+    if _PRINT.search(code) and _BARE_EXEC.search(code) is None and ".execute" not in code.lower():
         if _looks_like_query(line):
             return "closed", "not_a_sink", ""
         return None, "", ""
@@ -244,29 +248,161 @@ def _template(first: str) -> str:
 
 
 def _doc_lines(lines: list[str]) -> list[bool]:
-    mask: list[bool] = []
-    inside = False
-    marker = ""
-    for line in lines:
-        if not inside:
-            stripped = line.strip()
-            if stripped.startswith('"""') or stripped.startswith("'''"):
-                marker = stripped[:3]
-                count = line.count(marker)
-                mask.append(True)
-                inside = count % 2 == 1
-                continue
-            mask.append(False)
-            continue
-        mask.append(True)
-        if marker and marker in line:
-            inside = False
-    return mask
+    """True when the line is inside a quote, so a sample statement is not a call."""
+
+    masks = literal_masks("\n".join(lines))
+    marked: list[bool] = []
+    for line, mask in zip(lines, masks):
+        exposed = [char for char, hidden in zip(line, mask) if not hidden and char.strip()]
+        marked.append(bool(line.strip()) and not exposed and any(mask))
+    return marked
 
 
 def _is_comment(line: str) -> bool:
     stripped = line.strip()
     return stripped.startswith("#") or stripped.startswith("//")
+
+
+def is_document(path: str) -> bool:
+    """True for prose the execution rules should not score."""
+
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if name.startswith("requirements") or name in {"constraints.txt", "pipfile"}:
+        return False
+    return _suffix(path) in _DOC_EXT
+
+
+def literal_masks(text: str) -> list[list[bool]]:
+    """Mark quotes, comments, and docstrings. True means the character is not code."""
+
+    masks: list[list[bool]] = []
+    triple: str | None = None
+    block = False
+    for line in text.splitlines():
+        mask = [False] * len(line)
+        index = 0
+        length = len(line)
+        while index < length:
+            if triple is not None:
+                end = line.find(triple, index)
+                stop = length if end < 0 else end + len(triple)
+                for cursor in range(index, stop):
+                    mask[cursor] = True
+                index = stop
+                if end < 0:
+                    break
+                triple = None
+                continue
+            if block:
+                end = line.find("*/", index)
+                stop = length if end < 0 else end + 2
+                for cursor in range(index, stop):
+                    mask[cursor] = True
+                index = stop
+                block = end < 0
+                continue
+            if _opens_comment(line, index):
+                for cursor in range(index, length):
+                    mask[cursor] = True
+                break
+            if line.startswith("/*", index):
+                block = True
+                mask[index] = True
+                if index + 1 < length:
+                    mask[index + 1] = True
+                index += 2
+                continue
+            if line[index] in {"'", '"', "`"}:
+                index, opened = _mask_string(line, mask, index)
+                if opened is not None:
+                    triple = opened
+                    break
+                continue
+            index += 1
+        masks.append(mask)
+    return masks
+
+
+def quote_only(line: str, mask: list[bool], patterns: tuple[re.Pattern[str], ...]) -> bool:
+    """True when every match is inside a quote or comment and is not a call argument."""
+
+    saw = False
+    for pattern in patterns:
+        for match in pattern.finditer(line):
+            saw = True
+            if _match_in_code(mask, match.start(), match.end()):
+                return False
+            if _call_keeps(line, mask, match.start()):
+                return False
+    return saw
+
+
+def _opens_comment(line: str, index: int) -> bool:
+    if line.startswith("#", index):
+        return True
+    if not line.startswith("//", index):
+        return False
+    return index == 0 or line[index - 1] != ":"
+
+
+def _mask_string(line: str, mask: list[bool], index: int) -> tuple[int, str | None]:
+    """Mask one literal. The marker is set when a triple quote stays open."""
+
+    quote = line[index]
+    triple = quote != "`" and line.startswith(quote * 3, index)
+    marker = quote * 3 if triple else quote
+    cursor = index + len(marker)
+    while cursor < len(line):
+        if line[cursor] == "\\":
+            cursor += 2
+            continue
+        if line.startswith(marker, cursor):
+            for spot in range(index, cursor + len(marker)):
+                mask[spot] = True
+            return cursor + len(marker), None
+        cursor += 1
+    for spot in range(index, len(line)):
+        mask[spot] = True
+    if triple:
+        return len(line), marker
+    return len(line), None
+
+
+def _match_in_code(mask: list[bool], start: int, end: int) -> bool:
+    return any(not mask[index] for index in range(start, min(end, len(mask))))
+
+
+def _call_keeps(line: str, mask: list[bool], index: int) -> bool:
+    """A quoted token still counts when a real call receives it as an argument."""
+
+    depth = 0
+    cursor = index - 1
+    while cursor >= 0:
+        if cursor < len(mask) and mask[cursor]:
+            cursor -= 1
+            continue
+        char = line[cursor]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            if depth == 0:
+                name = re.search(r"([A-Za-z_][\w.]*)\s*$", line[:cursor])
+                if name is None:
+                    return False
+                return _regex_compiler(name.group(1)) is False
+            depth -= 1
+        cursor -= 1
+    return False
+
+
+def _regex_compiler(name: str) -> bool:
+    return (
+        re.search(
+            r"(?i)(?:^re\.(?:compile|search|match|findall|fullmatch|sub)$)|(?:^Pattern\.compile$)|(?:^RegExp$)",
+            name,
+        )
+        is not None
+    )
 
 
 def _suffix(path: str) -> str:

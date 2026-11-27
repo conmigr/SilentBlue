@@ -168,6 +168,37 @@ _PIPELINE_REPAIR = (
 )
 
 
+def mention_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
+    """Patterns that decide whether an extra-rule hit is only a quotation."""
+
+    return {
+        "nosql-unparameterized": (_NOSQL,),
+        "ldap-filter-assembled": (_LDAP,),
+        "template-from-string": (_TEMPLATE,),
+        "header-from-request": (_HEADER,),
+        "html-parsed-from-string": (_XSS,),
+        "path-from-request": (_PATH,),
+        "request-url-from-input": (_HTTP,),
+        "redirect-from-request": (_REDIRECT,),
+        "weak-password-hash": (_FAST_HASH,),
+        "weak-token-random": (_WEAK_RANDOM,),
+        "weak-cipher": (_WEAK_CIPHER,),
+        "unsafe-deserialization": (_PICKLE, _UNSAFE_LOAD, _YAML),
+        "jwt-verify-disabled": (_JWT_OFF,),
+        "cookie-flag-disabled": (_COOKIE_OFF,),
+        "csrf-disabled": (_CSRF_OFF,),
+        "request-body-expanded": (_MASS,),
+        "rate-limit-disabled": (_RATE_OFF,),
+        "default-credential": (_DEFAULT,),
+        "security-header-disabled": (_HOSTS, _HEADER_OFF),
+        "logging-disabled": (_LOG_OFF,),
+        "dependency-unpinned": (_WILDCARD_VERSION,),
+        "dependency-cleartext": (_CLEARTEXT_DEP,),
+        "piped-download": (_PIPED,),
+        "workflow-permissions-wide": (_PIPELINE,),
+    }
+
+
 def extra_findings(path: str, number: int, line: str) -> list[Finding]:
     """Return control gaps that sit outside the original five line rules."""
 

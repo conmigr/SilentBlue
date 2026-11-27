@@ -67,12 +67,12 @@ def display_id(repo_name: str, number: int) -> str:
     return f"{display_prefix(repo_name)}-{number}"
 
 
-def assessment_title(repo_name: str) -> str:
-    """One line. SilentBlue and Assessment stay, and a long name is cut."""
+def assessment_title(repo_name: str, *, partial: bool = False) -> str:
+    """One line. A finished review says Assessment. An unfinished review says Partial."""
 
     name = " ".join(repo_name.split()) or "repository"
     prefix = "SilentBlue "
-    suffix = " Assessment"
+    suffix = " Partial" if partial else " Assessment"
     if len(prefix) + len(name) + len(suffix) <= 60:
         return prefix + name + suffix
     room = 60 - len(prefix) - len(suffix) - 3
@@ -111,7 +111,7 @@ def render_html(report: FinalReport) -> str:
     """One self-contained HTML file. It loads nothing from the network."""
 
     body = "\n".join(_html_block(block) for block in _document(report))
-    title = assessment_title(report.repo_name)
+    title = assessment_title(report.repo_name, partial=_partial(report))
     foot = escape(footer_line(report))
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -159,21 +159,45 @@ def render_pdf(report: FinalReport) -> bytes:
 
 
 def _document(report: FinalReport) -> list[_Block]:
-    metrics = report.metrics
     count = len(report.findings)
     noun = "finding" if count == 1 else "findings"
     blocks: list[_Block] = [
-        _Block("title", assessment_title(report.repo_name)),
+        _Block("title", assessment_title(report.repo_name, partial=_partial(report))),
         _Block("p", _opening(report)),
-        _Block("h2", "Summary"),
-        _Block("p", f"This assessment reported {count} {noun}."),
-        _Block("table", rows=_summary_rows(report.findings)),
-        _Block("h2", "Categories"),
-        _Block("p", "The findings are grouped by control category in the table below."),
-        _Block("table", rows=_category_rows(report.findings)),
-        _Block("h2", "Scope"),
     ]
+    if _partial(report):
+        blocks.append(_Block("h2", "Review"))
+        blocks.append(_Block("p", _review_lead(report)))
+    product, other = _by_role(report.findings)
+    product_noun = "product gap" if len(product) == 1 else "product gaps"
+    blocks.extend(
+        [
+        _Block("h2", "Summary"),
+        _Block("p", f"This assessment reported {len(product)} {product_noun}."),
+        ]
+    )
+    if other:
+        blocks.append(
+            _Block(
+                "p",
+                f"{len(other)} other open rows stay on the record and are not in that count.",
+            )
+        )
+    blocks.append(_Block("table", rows=_summary_rows(report.findings)))
+    blocks.append(_Block("h2", "Categories"))
+    blocks.append(_Block("p", "The findings are grouped by control category in the table below."))
+    blocks.append(_Block("table", rows=_category_rows(report.findings)))
+    blocks.append(_Block("h2", "Scope"))
     blocks.extend(_Block("p", sentence) for sentence in _scope_sentences(report))
+    if other:
+        blocks.append(_Block("h2", "Other open rows"))
+        blocks.append(
+            _Block(
+                "p",
+                "Test secrets, specimens, and docs stay visible. A test secret leaves the release gate after the owner confirm matches the line.",
+            )
+        )
+        blocks.append(_Block("table", rows=_role_rows(report)))
     blocks.append(_Block("h2", "Index"))
     blocks.append(_Block("p", f"The index lists {count} {noun}."))
     if report.findings:
@@ -227,11 +251,75 @@ def _finding_blocks(repo_name: str, number: int, finding: Finding) -> list[_Bloc
     return blocks
 
 
+def _partial(report: FinalReport) -> bool:
+    return report.metrics.model_review == "incomplete"
+
+
+def _by_role(findings: list[Finding]) -> tuple[list[Finding], list[Finding]]:
+    product = [finding for finding in findings if finding.role in {"", "product"}]
+    other = [finding for finding in findings if finding.role not in {"", "product"}]
+    return product, other
+
+
+def _review_lead(report: FinalReport) -> str:
+    sentences = ["This is a partial assessment. Resume with /scan resume."]
+    coverage = report.coverage
+    if coverage is not None and coverage.unread:
+        sentences.append("Unread paths: " + ", ".join(coverage.unread) + ".")
+    if coverage is not None:
+        skipped = [row for row in coverage.rows if row.model_state.startswith("skipped:")]
+        if skipped:
+            shown = ", ".join(f"{row.path} ({row.model_state})" for row in skipped)
+            sentences.append(f"Skipped paths: {shown}.")
+        if coverage.stop == "budget":
+            sentences.append("The call budget stopped the review.")
+        elif coverage.stop == "owner":
+            sentences.append("The owner stopped the review.")
+        if coverage.refute == "not_started":
+            sentences.append("Refute did not start.")
+        if coverage.miss == "not_started":
+            sentences.append("Miss did not start.")
+    return " ".join(sentences)
+
+
+def _role_rows(report: FinalReport) -> tuple[tuple[str, ...], ...]:
+    rows = [("Role", "Id", "Rule", "Location", "Owner")]
+    for index, finding in enumerate(report.findings, start=1):
+        if finding.role in {"", "product"}:
+            continue
+        number = finding.number or index
+        rows.append(
+            (
+                finding.role,
+                display_id(report.repo_name, number),
+                finding.rule_id,
+                f"{finding.file}:{finding.line}",
+                _owner_action(finding),
+            )
+        )
+    return tuple(rows)
+
+
+def _owner_action(finding: Finding) -> str:
+    if finding.role == "specimen":
+        return "Specimen"
+    if finding.role == "docs":
+        return "Docs"
+    if finding.rule_id == "hardcoded-secret" and finding.owner_confirm == "recorded":
+        return "Owner confirmed"
+    if finding.rule_id == "hardcoded-secret" and finding.owner_confirm == "stale":
+        return "Line changed"
+    if finding.role == "test" and finding.rule_id == "hardcoded-secret":
+        return "Confirm the value cannot authenticate"
+    return "Test"
+
+
 def _opening(report: FinalReport) -> str:
     date = assessment_date(report.generated_at)
+    kind = "partial assessment" if _partial(report) else f"{report.profile} assessment"
     sentences = [
         (
-            f"This Silent Blue {report.profile} assessment of {report.repo_name} "
+            f"This Silent Blue {kind} of {report.repo_name} "
             f"was recorded on {date} with version {report.version}."
         ),
         "It reviews the source controls and the coverage ledger.",
@@ -277,10 +365,14 @@ def _scope_sentences(report: FinalReport) -> list[str]:
             sentences.append("Coverage is saturated. Every applicable file was checked or skipped with a reason.")
         else:
             sentences.append("Coverage is not saturated. At least one applicable file was not checked.")
+        if any(row.model_state for row in coverage.rows):
+            if coverage.model_saturated:
+                sentences.append("Model coverage is saturated. Every review path was read.")
+            else:
+                sentences.append("Model coverage is not saturated. At least one review path was not read.")
         if coverage.unread:
-            shown = ", ".join(coverage.unread[:8])
             sentences.append(
-                f"{len(coverage.unread)} review paths were not read. The first of those paths are {shown}."
+                f"{len(coverage.unread)} review paths were not read: {', '.join(coverage.unread)}."
             )
     if report.edge_passed:
         sentences.append(
@@ -370,6 +462,12 @@ def _facts(finding: Finding) -> str:
             f"at {finding.file}:{finding.line}, case {case}."
         )
     ]
+    if finding.role:
+        parts.append(f"The path role is {finding.role}.")
+    if finding.owner_confirm == "recorded":
+        parts.append("The owner confirmed this test secret. The line hash still matches.")
+    elif finding.owner_confirm == "stale":
+        parts.append("The owner confirm no longer matches this line.")
     if finding.verdict:
         parts.append(f"The verdict is {finding.verdict}.")
     if finding.playbook:

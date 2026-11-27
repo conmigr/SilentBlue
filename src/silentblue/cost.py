@@ -43,6 +43,7 @@ class SpendEstimate:
     source_files: int = 0
     units: int = 0
     files_covered: int = 0
+    follow_up_calls: int = 0
 
 
 def rate_for(provider: str, model: str) -> tuple[float, float] | None:
@@ -93,19 +94,24 @@ def estimate_spend(
 ) -> SpendEstimate:
     """Bound an assess run by the call budget. Detect stays at zero.
 
-    The scan builds the real file list first. This estimate uses the source
-    tree, one call per unit, and stops at max_calls.
+    The scan builds the real file list first. This allowance is one call per
+    read unit. When that list fits in max_calls, it adds one follow-up call
+    per source file for refute or miss, and it still stops at max_calls.
     """
 
     if profile != "assess" or source_files <= 0:
         return SpendEstimate(0, 0, 0, 0.0, True, "", "", PRICE_DATE, source_files, 0, 0)
     per_unit = max(1, max_files_per_unit)
     chunks = math.ceil(source_files / per_unit)
-    calls = min(max_calls, chunks)
-    files_covered = min(source_files, calls * per_unit)
+    read_calls = min(max_calls, chunks)
+    follow_up = source_files if chunks <= max_calls else 0
+    follow_up = min(follow_up, max(0, max_calls - read_calls))
+    calls = read_calls + follow_up
+    files_covered = min(source_files, read_calls * per_unit)
     files_in_unit = min(per_unit, source_files)
     unit_tokens = (max_excerpt_bytes * files_in_unit) // _CHARS_PER_TOKEN
-    input_tokens = (unit_tokens + _REVIEW_PROMPT_TOKENS) * calls
+    one_file = (max_excerpt_bytes // _CHARS_PER_TOKEN) + _REVIEW_PROMPT_TOKENS
+    input_tokens = (unit_tokens + _REVIEW_PROMPT_TOKENS) * read_calls + one_file * follow_up
     output_tokens = _ASSUMED_OUTPUT_TOKENS * calls
     rate = rate_for(provider, model_name)
     cost = dollars(input_tokens, output_tokens, rate) if rate is not None else None
@@ -121,6 +127,7 @@ def estimate_spend(
         source_files=source_files,
         units=chunks,
         files_covered=files_covered,
+        follow_up_calls=follow_up,
     )
 
 

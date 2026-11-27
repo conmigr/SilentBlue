@@ -141,7 +141,8 @@ def test_report_only_writes_the_case_and_leaves_source(workspace):
     scanned = _scan(workspace)
     source = workspace["repo"] / "app.py"
     before = source.read_bytes()
-    assert scanned.exit_code == 0
+    assert scanned.exit_code == 1
+    assert "release gate:" in scanned.message
     assert source.read_bytes() == before
     assert not (workspace["repo"] / "security-remediation").exists()
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
@@ -209,7 +210,8 @@ def test_fix_mode_records_a_refusal_and_leaves_source(workspace):
         state_dir=workspace["state"],
         manifest_dir=workspace["manifests"],
     )
-    assert again.exit_code == 0
+    assert again.exit_code == 1
+    assert "release gate:" in again.message
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert all(not item["file"].startswith("security-remediation") for item in report["findings"])
 
@@ -254,7 +256,9 @@ def test_inconclusive_gap_is_not_a_case(workspace, monkeypatch):
         state_dir=workspace["state"],
         manifest_dir=workspace["manifests"],
         profile="assess",
-        client=ScriptedClient([json.dumps({"observations": []})]),
+        client=ScriptedClient(
+            [json.dumps({"observations": []}), json.dumps({"observations": []})]
+        ),
     )
     assert scanned.exit_code == 0
     result = run_remediate(

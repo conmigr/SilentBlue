@@ -578,7 +578,7 @@ def _packages(repo: Path, relative: str, text: str) -> list[_Package]:
 def _pin_findings(repo: Path, relative: str, text: str) -> list[Finding]:
     findings: list[Finding] = []
     for package in _packages(repo, relative, text):
-        if package.exact:
+        if package.exact or _has_upper_bound(package.version):
             continue
         if _locked(repo, relative, package):
             continue
@@ -695,7 +695,7 @@ def _npm_packages(repo: Path, relative: str, text: str) -> list[_Package]:
                 _Package(
                     "npm",
                     name,
-                    pinned_version if exact else "",
+                    pinned_version if exact else version,
                     relative,
                     line_no,
                     line,
@@ -759,7 +759,7 @@ def _poetry_table(relative: str, text: str, table: object) -> list[_Package]:
             continue
         exact_match = _POETRY_EXACT.fullmatch(spec)
         exact = exact_match is not None and "*" not in exact_match.group(1)
-        version = exact_match.group(1) if exact and exact_match is not None else ""
+        version = exact_match.group(1) if exact and exact_match is not None else spec
         line_no, line = _line_containing(text, name)
         packages.append(_Package("PyPI", name, version, relative, line_no, line, exact))
     return packages
@@ -791,7 +791,7 @@ def _lock_names(repo: Path, directory: Path, ecosystem: str) -> set[str]:
     if ecosystem == "npm":
         files = ("package-lock.json",)
     else:
-        files = ("poetry.lock", "Pipfile.lock")
+        files = ("poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock")
     for filename in files:
         path = directory / filename
         if not path.is_file() or is_reparse_point(path) or not is_within(repo, path):
@@ -801,11 +801,28 @@ def _lock_names(repo: Path, directory: Path, ecosystem: str) -> set[str]:
             continue
         if filename == "package-lock.json":
             names.update(_npm_lock_names(text))
-        elif filename == "poetry.lock":
-            names.update(name.lower() for name in _LOCK_NAME.findall(text))
-        else:
+        elif filename == "Pipfile.lock":
             names.update(name.lower() for name in _pipfile_lock_names(text))
+        else:
+            names.update(name.lower() for name in _LOCK_NAME.findall(text))
     return names
+
+
+def _has_upper_bound(spec: str) -> bool:
+    """True when the specifier cannot float upward forever."""
+
+    text = spec.strip()
+    if not text or text in {"*", "latest"}:
+        return False
+    if "~=" in text:
+        return True
+    if re.search(r"(?:^|[\s,])<[>=]?\s*\d", text):
+        return True
+    if re.search(r"(?:^|[\s,])[\^~]\d", text):
+        return True
+    if re.search(r"\d\.(?:x|\*)\b", text):
+        return True
+    return False
 
 
 def _npm_lock_names(text: str) -> set[str]:
