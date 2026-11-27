@@ -59,7 +59,13 @@ Findings
   /report               Paths of the written reports
   /exclusions           Directories left out of the scan
   /skills               Harness skills. /skill <name> shows one
-  /triage               Dispositions stored outside the repository
+  /triage               Decisions already recorded. A scan does not ask
+  /triage assign <case id> <owner>
+                      Name an owner. Asks first
+  /triage accept <case id> <date> <reason>
+                      Keep a risk until a date. Asks first
+  /triage confirm <case id> <reason>
+                      A test secret cannot authenticate. Asks first
 """
 
 HELP_MODEL = """\
@@ -190,6 +196,9 @@ def finding_view(repo_name: str, number: int, finding: Finding) -> list[str]:
         ),
         "",
     ]
+    if finding.role:
+        lines.append(f"The path role is {finding.role}.")
+        lines.append("")
     lines.extend(labeled("Title", _sentence(finding.title)))
     lines.append("")
     score = "This finding has no CVSS score."

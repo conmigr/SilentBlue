@@ -16,6 +16,56 @@ def _scan(tmp_path, name: str, source: str):
     return findings
 
 
+def _scan_both(tmp_path, name: str, source: str):
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    scope = ScopeResult(
+        files=[ScopedFile(path=name, size=path.stat().st_size, language="python")]
+    )
+    return detect(tmp_path, scope)
+
+
+def test_a_quotation_is_closed_and_a_call_stays(tmp_path):
+    findings, dropped = _scan_both(
+        tmp_path,
+        "app.py",
+        "\n".join(
+            [
+                'note = "client.get(url, verify=False)"',
+                "client.get(url, verify=False)",
+                'rule = re.compile(r"verify=False|AES/ECB")',
+                'APP = """',
+                "def lookup(conn, name):",
+                '    conn.execute("SELECT " + name)',
+                '"""',
+                'conn.execute("SELECT " + name)',
+            ]
+        ),
+    )
+    rules = {(finding.rule_id, finding.line) for finding in findings}
+    assert ("tls-verify-disabled", 2) in rules
+    assert ("sql-unparameterized", 8) in rules
+    assert not any(finding.line in {1, 3, 6} for finding in findings)
+    reasons = {item.reason for item in dropped}
+    assert "mentioned" in reasons
+
+
+def test_a_document_closes_the_call_and_keeps_a_live_secret(tmp_path):
+    findings, dropped = _scan_both(
+        tmp_path,
+        "guide.md",
+        "\n".join(
+            [
+                "Turn verification off with verify=False.",
+                'api_key = "AKIAIOSFODNN7EXAMPLE"',
+            ]
+        ),
+    )
+    assert [finding.rule_id for finding in findings] == ["hardcoded-secret"]
+    assert any(item.reason == "document" and item.rule_id == "tls-verify-disabled" for item in dropped)
+
+
 def test_parameterized_sql_and_comments_are_quiet(tmp_path):
     findings = _scan(
         tmp_path,

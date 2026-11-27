@@ -42,7 +42,8 @@ def test_round_trip_keeps_case_ids_and_leaves_source(workspace):
         state_dir=workspace["state"],
         manifest_dir=workspace["manifests"],
     )
-    assert scanned.exit_code == 0
+    assert scanned.exit_code == 1
+    assert "release gate:" in scanned.message
     original = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     sarif_path = next((workspace["repo"] / "security-scan").glob("*_report.sarif"))
     result = run_ingest(

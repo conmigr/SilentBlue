@@ -89,7 +89,8 @@ def test_stop_after_d0_writes_an_empty_report(workspace):
 def test_full_scan_reports_agree_and_redact(workspace):
     _seed(workspace["repo"])
     result = _scan(workspace, stop_after="d9")
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "release gate:" in result.message
     assert result.finding_count >= 4
     findings, markdown, sarif = _artifacts(workspace["repo"])
     assert findings["schema_version"] == "1.1"
@@ -158,10 +159,11 @@ def test_full_scan_reports_agree_and_redact(workspace):
 def test_resume_uses_checkpoints_until_one_is_corrupt(workspace):
     _seed(workspace["repo"])
     first = _scan(workspace)
-    assert first.exit_code == 0
+    assert first.exit_code == 1
+    assert "release gate:" in first.message
     first_report, _, _ = _artifacts(workspace["repo"])
     second = _scan(workspace, resume=True)
-    assert second.exit_code == 0
+    assert second.exit_code == 1
     second_manifest = json.loads(Path(second.manifest_path).read_text(encoding="utf-8"))
     assert second_manifest["stages"]["d0"] == "cached"
     assert second_manifest["stages"]["d8"] == "cached"
@@ -175,7 +177,7 @@ def test_resume_uses_checkpoints_until_one_is_corrupt(workspace):
     assert len(checkpoints) == 1
     checkpoints[0].write_text("{", encoding="utf-8")
     third = _scan(workspace, resume=True)
-    assert third.exit_code == 0
+    assert third.exit_code == 1
     third_manifest = json.loads(Path(third.manifest_path).read_text(encoding="utf-8"))
     assert third_manifest["stages"]["d0"] == "completed"
     third_report, _, _ = _artifacts(workspace["repo"])
@@ -220,8 +222,9 @@ def test_cli_estimate_and_scan(workspace):
             "d9",
         ],
     )
-    assert scanned.exit_code == 0
-    assert "findings:" in scanned.stdout
+    assert scanned.exit_code == 1
+    assert "release gate:" in scanned.stderr
+    assert "findings:" in scanned.stderr
     assert (workspace["repo"] / "security-scan" / "findings.json").is_file()
 
     doctor = runner.invoke(

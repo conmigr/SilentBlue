@@ -14,7 +14,7 @@ from silentblue import __version__
 from silentblue.config import load_config
 from silentblue.dialogue import ROUTER_SYSTEM, Decision, interpret, parse_router_reply
 from silentblue.deploy import deploy_preview, open_authorization, run_deploy
-from silentblue.errors import SilentBlueError
+from silentblue.errors import SilentBlueError, UsageError
 from silentblue.layout import (
     accent,
     card,
@@ -836,6 +836,9 @@ class Session:
             return
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
+            if command.startswith("/triage confirm "):
+                self._confirm_secret(command, stamp)
+                return
             if command.startswith("/triage accept "):
                 _triage, _accept, case_id, day, reason = command.split(None, 4)
                 entry = TriageEntry(
@@ -858,6 +861,42 @@ class Session:
             self._error(exc)
             return
         self.writer(f"Recorded  {entry.disposition}  {entry.case_id}")
+
+    def _confirm_secret(self, command: str, stamp: str) -> None:
+        from silentblue.confirm import ConfirmEntry, line_hash, record_confirm
+        from silentblue.roles import path_role
+
+        if self.resolved_state is None:
+            self.writer("No state directory.")
+            return
+        _triage, _confirm, case_id, reason = command.split(None, 3)
+        self._load_report()
+        finding = None
+        if self.report is not None:
+            for item in self.report.findings:
+                if item.case_id == case_id:
+                    finding = item
+                    break
+        if finding is None:
+            raise UsageError("confirm needs a finding from the latest report")
+        if path_role(finding.file) != "test" or finding.rule_id != "hardcoded-secret":
+            raise UsageError("confirm is for a test secret")
+        digest = line_hash(self.repo, finding.file, finding.line)
+        if digest is None:
+            raise UsageError("confirm needs the current line")
+        record_confirm(
+            self.resolved_state,
+            self.repo,
+            ConfirmEntry(
+                case_id=case_id,
+                path=finding.file,
+                rule_id=finding.rule_id,
+                line_hash=digest,
+                reason=reason.strip(),
+                recorded_at=stamp,
+            ),
+        )
+        self.writer(f"Recorded  confirm  {case_id}")
 
     def _exclusions(self) -> None:
         try:

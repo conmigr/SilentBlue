@@ -232,7 +232,8 @@ def test_accept_reorders_and_a_edit_is_stale(workspace):
         manifest_dir=workspace["manifests"],
     )
     report = json.loads((repo / "security-scan" / "findings.json").read_text(encoding="utf-8"))
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "release gate:" in result.message
     assert report["threat_model"] == "accepted"
     assert report["findings"][0]["file"] == "app.py"
     assert report["findings"][0]["threat_note"].startswith("Asset:")
@@ -398,7 +399,8 @@ def test_a_restart_shows_the_kept_osv_findings(workspace, monkeypatch):
         osv=True,
         advisory_fetch=fetch,
     )
-    assert queried.exit_code == 0
+    assert queried.exit_code == 1
+    assert "release gate:" in queried.message
     text = _run(workspace, ["show osv findings", "/quit"])
     assert "Kept from the last OSV query" in text
     assert "OSV findings: 1" in text

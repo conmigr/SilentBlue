@@ -170,6 +170,11 @@ def run_scan(
             message = f"{message}; assessment degraded"
         if config.profile == "assess":
             message = f"{message}; {_assess_outcome(report, ctx)}"
+        gate = _release_gate(report)
+        if gate:
+            if exit_code == 0:
+                exit_code = 1
+            message = f"{message}; {gate}"
         if kept_note:
             message = f"{message}; {kept_note}"
     except SilentBlueError as exc:
@@ -269,6 +274,7 @@ def estimate_repo(
         f"estimated_units: {estimate.units}",
         f"source_files: {estimate.source_files}",
         f"files_in_budget: {estimate.files_covered}",
+        f"follow_up_calls: {estimate.follow_up_calls}",
     ]
     if estimate.model_name:
         lines.append(f"model: {estimate.model_provider}/{estimate.model_name}")
@@ -437,6 +443,24 @@ def _prepare_model(config: AppConfig) -> AppConfig:
     if config.profile != "assess":
         return config
     return config.model_copy(update={"model": configured_model(config.model)})
+
+
+def _release_gate(report: FinalReport) -> str:
+    """Fail a finished scan when the review is unread or a product gap is open.
+
+    Test secrets, specimens, and docs stay on the report and do not fail this gate.
+    """
+
+    reasons: list[str] = []
+    if report.metrics.model_review == "incomplete":
+        reasons.append("model review incomplete")
+    product = sum(1 for finding in report.findings if finding.role == "product")
+    if product:
+        noun = "product gap" if product == 1 else "product gaps"
+        reasons.append(f"{product} {noun}")
+    if not reasons:
+        return ""
+    return "release gate: " + "; ".join(reasons)
 
 
 def _assess_outcome(report: FinalReport, ctx: StageContext) -> str:

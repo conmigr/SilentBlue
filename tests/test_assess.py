@@ -62,9 +62,12 @@ def test_confirmed_gap_carries_playbook_line_and_verdict(workspace):
                     ]
                 }
             ),
+            json.dumps({"keep": True}),
+            json.dumps({"keep": True}),
         ],
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "release gate:" in result.message
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assessed = [item for item in report["findings"] if item["origin"] == "assessment"]
     assert len(assessed) == 1
@@ -75,7 +78,7 @@ def test_confirmed_gap_carries_playbook_line_and_verdict(workspace):
     assert gap["verdict"] == "confirmed"
     assert gap["case_id"].startswith("sb1_")
     assert report["profile"] == "assess"
-    assert report["metrics"]["model_calls"] == 1
+    assert report["metrics"]["model_calls"] == 3
     assert gap["category"] == "injection"
     assert report["metrics"]["model_review"] == "complete"
     assert report["hollow"] is False
@@ -110,9 +113,11 @@ def test_bad_line_is_dropped(workspace):
                     ]
                 }
             ),
+            json.dumps({"keep": True}),
         ],
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "product gap" in result.message
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert all(item["line"] != 99 for item in report["findings"])
     assert any(item["reason"] == "line_out_of_range" for item in report["dropped"])
@@ -160,13 +165,16 @@ def test_an_empty_model_reply_is_not_labeled_unparseable(workspace):
 
 
 def test_invalid_json_leaves_the_review_incomplete(workspace):
-    result, _client = _scan(workspace, "value = 1\n", ["not json"], name="app.py")
-    assert result.exit_code == 0
-    assert "model review incomplete" in result.message
+    result, _client = _scan(workspace, "value = 1\n", ["not json", "not json"], name="app.py")
+    assert result.exit_code == 1
+    assert "release gate: model review incomplete" in result.message
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert report["findings"] == []
     assert report["hollow"] is False
     assert report["metrics"]["model_review"] == "incomplete"
+    assert "Partial assessment." in report["summary"]
+    assert "Refute did not start." in report["summary"]
+    assert "Miss did not start." in report["summary"]
     assert not any(item["reason"] == "unparseable" for item in report["dropped"])
     saved = list(workspace["state"].rglob("reply-*.txt"))
     assert saved
@@ -178,17 +186,19 @@ def test_empty_observations_still_reads_the_file(workspace):
     result, client = _scan(
         workspace,
         "value = 1\n",
-        [json.dumps({"observations": []})],
+        [json.dumps({"observations": []}), json.dumps({"observations": []})],
     )
     assert result.exit_code == 0
     report = json.loads((workspace["repo"] / "security-scan" / "findings.json").read_text(encoding="utf-8"))
     assert report["findings"] == []
     assert report["hollow"] is False
-    assert report["metrics"]["model_calls"] == 1
+    assert report["metrics"]["model_calls"] == 2
     assert report["metrics"]["model_review"] == "complete"
     assert "assessment gaps added: 0" in result.message
     assert "dropped:" not in result.message
     assert "Model read 1 of 1 list paths" in report["summary"]
+    assert "Refute did not start" not in report["summary"]
+    assert "Miss finished." in report["summary"]
     assert "untrusted" not in report["summary"]
     assert any("1|value = 1" in prompt for prompt in client.prompts)
 

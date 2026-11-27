@@ -46,9 +46,23 @@ def test_assess_estimate_is_bounded_by_the_call_budget():
         provider="openai",
         model_name="gpt-6.1-terra",
     )
-    assert estimate.calls == 1
+    assert estimate.calls == 4
+    assert estimate.follow_up_calls == 3
+    assert estimate.units == 1
     assert estimate.cost_usd is not None
     assert estimate.cost_usd > 0
+    capped = estimate_spend(
+        profile="assess",
+        source_files=8,
+        max_calls=1,
+        max_units=20,
+        max_files_per_unit=4,
+        max_excerpt_bytes=8000,
+        provider="openai",
+        model_name="gpt-6.1-terra",
+    )
+    assert capped.calls == 1
+    assert capped.follow_up_calls == 0
     assert dollars(1_000_000, 0, (1.0, 5.0)) == 1.0
 
 

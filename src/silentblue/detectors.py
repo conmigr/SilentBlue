@@ -12,8 +12,10 @@ import re
 from pathlib import Path
 
 from silentblue.coverage import extra_findings
-from silentblue.evidence import fixture_secret, live_secret, sql_clusters
+from silentblue.coverage import mention_patterns as coverage_mentions
+from silentblue.evidence import fixture_secret, is_document, literal_masks, live_secret, quote_only, sql_clusters
 from silentblue.languages import language_findings
+from silentblue.languages import mention_patterns as language_mentions
 from silentblue.models import DroppedFinding, Finding, ScopedFile, ScopeResult
 from silentblue.supply import offline_findings
 from silentblue.paths import is_within
@@ -81,6 +83,18 @@ _CONFIG_NAMES = {
     ".env",
 }
 _LONG_LINE = 4000
+_SQL_TOKEN = re.compile(r"(?i)\b(?:SELECT|INSERT|UPDATE|DELETE|execute|executemany|query)\b")
+_DETECTOR_MENTIONS = {
+    "shell-command": (_OS_SYSTEM, _SHELL_TRUE, _NODE_EXEC),
+    "shell-enabled": (_SHELL_TRUE, _NODE_EXEC),
+    "dynamic-eval": (_EVAL, _EXTERNAL),
+    "tls-verify-disabled": (_TLS,),
+    "debug-enabled": (_DEBUG,),
+    "cors-wildcard": (_CORS,),
+    "html-parsed-from-string": (_HTML_ASSIGN, _HTML_WRITE),
+    "token-in-web-storage": (_WEB_STORAGE, _STORED_SECRET),
+    "sql-unparameterized": (_SQL_TOKEN,),
+}
 
 _SECRET_REMEDIATION = (
     "Delete the literal from the tracked file and revoke it at the issuer. "
@@ -329,6 +343,8 @@ def _file_findings(path: str, language: str, text: str) -> tuple[list[Finding], 
     findings: list[Finding] = []
     dropped: list[DroppedFinding] = []
     lines = text.splitlines()
+    masks = literal_masks(text)
+    document = is_document(path)
     for cluster in sql_clusters(path, text):
         if cluster.status == "closed":
             dropped.append(
@@ -341,27 +357,26 @@ def _file_findings(path: str, language: str, text: str) -> tuple[list[Finding], 
             )
             continue
         source_line = lines[cluster.line - 1] if cluster.line <= len(lines) else ""
-        findings.append(
-            _make(
-                path,
-                cluster.line,
-                source_line,
-                rule_id="sql-unparameterized",
-                control_family="injection",
-                severity="high",
-                title="SQL built by string assembly",
-                description=(
-                    "A database call builds a statement with interpolation, "
-                    "concatenation, or formatting."
-                    if cluster.status == "detector"
-                    else "A database call builds a statement, and this line does not show whether the inserted value is caller-controlled."
-                ),
-                remediation=_SQL_REMEDIATION,
-                confidence=0.7 if cluster.status == "detector" else 0.4,
-                verdict=cluster.status,
-                also_at=list(cluster.also_at),
-            )
+        finding = _make(
+            path,
+            cluster.line,
+            source_line,
+            rule_id="sql-unparameterized",
+            control_family="injection",
+            severity="high",
+            title="SQL built by string assembly",
+            description=(
+                "A database call builds a statement with interpolation, "
+                "concatenation, or formatting."
+                if cluster.status == "detector"
+                else "A database call builds a statement, and this line does not show whether the inserted value is caller-controlled."
+            ),
+            remediation=_SQL_REMEDIATION,
+            confidence=0.7 if cluster.status == "detector" else 0.4,
+            verdict=cluster.status,
+            also_at=list(cluster.also_at),
         )
+        _keep(findings, dropped, finding, source_line, _mask_at(masks, cluster.line, source_line), document)
     for number, line in enumerate(lines, start=1):
         if _is_comment(line):
             continue
@@ -372,9 +387,49 @@ def _file_findings(path: str, language: str, text: str) -> tuple[list[Finding], 
             findings.append(secret)
         if len(line) > _LONG_LINE:
             continue
-        findings.extend(_rules_for_line(path, number, line))
-        findings.extend(language_findings(path, number, line, language))
+        mask = _mask_at(masks, number, line)
+        for finding in (
+            *_rules_for_line(path, number, line),
+            *language_findings(path, number, line, language),
+        ):
+            _keep(findings, dropped, finding, line, mask, document)
     return findings, dropped
+
+
+def _keep(
+    findings: list[Finding],
+    dropped: list[DroppedFinding],
+    finding: Finding,
+    line: str,
+    mask: list[bool],
+    document: bool,
+) -> None:
+    if document:
+        dropped.append(
+            DroppedFinding(rule_id=finding.rule_id, file=finding.file, line=finding.line, reason="document")
+        )
+        return
+    patterns = _mention_table().get(finding.rule_id, ())
+    if patterns and quote_only(line, mask, patterns):
+        dropped.append(
+            DroppedFinding(rule_id=finding.rule_id, file=finding.file, line=finding.line, reason="mentioned")
+        )
+        return
+    findings.append(finding)
+
+
+def _mask_at(masks: list[list[bool]], number: int, line: str) -> list[bool]:
+    if 1 <= number <= len(masks) and len(masks[number - 1]) == len(line):
+        return masks[number - 1]
+    return [False] * len(line)
+
+
+def _mention_table() -> dict[str, tuple[re.Pattern[str], ...]]:
+    merged: dict[str, tuple[re.Pattern[str], ...]] = {}
+    for table in (coverage_mentions(), language_mentions(), _DETECTOR_MENTIONS):
+        for rule_id, patterns in table.items():
+            merged[rule_id] = merged.get(rule_id, ()) + patterns
+    return merged
 
 
 def _canonical_files(root: Path, scope: ScopeResult) -> tuple[list[ScopedFile], dict[str, list[str]]]:

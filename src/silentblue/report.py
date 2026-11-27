@@ -23,6 +23,8 @@ from silentblue.models import (
 from silentblue.paths import is_reparse_point, is_within
 from silentblue.scope import is_source_path
 from silentblue.rank import prioritize
+from silentblue.confirm import confirm_status, line_hash
+from silentblue.roles import path_role
 from silentblue.scanledger import ledger_from_state
 from silentblue.redact import redact
 from silentblue.repair import APPLY_MARK, apply_note
@@ -55,6 +57,7 @@ def build_report(
     model, threat_state = threat_status(Path(state.repo), directory, scope_files)
     findings = apply_threat(findings, model, threat_state)
     findings = [_present(finding, index) for index, finding in enumerate(findings, start=1)]
+    findings = [_annotate(finding, Path(state.repo), directory) for finding in findings]
     metrics = _metrics(state, findings)
     hollow = _hollow(state, stages, len(findings))
     stamp = generated_at or _now()
@@ -79,8 +82,15 @@ def build_report(
         )
         if metrics.model_review == "incomplete":
             tail += " Model review incomplete."
+            tail += " Partial assessment. Resume with /scan resume."
         else:
             tail += " Model review complete."
+        tail += _pass_sentence("Refute", coverage_status(state, "refute"))
+        tail += _pass_sentence("Miss", coverage_status(state, "miss"))
+        if state.review_stop == "budget":
+            tail += " The call budget stopped the review."
+        elif state.review_stop == "owner":
+            tail += " The owner stopped the review."
     if hollow:
         tail += " This empty result is untrusted: no source was sent for review."
     if threat_state == "accepted":
@@ -98,8 +108,19 @@ def build_report(
             tail += " Coverage saturated."
         else:
             tail += " Coverage unsaturated."
+        if state.review_paths:
+            if coverage.model_saturated:
+                tail += " Model coverage saturated."
+            else:
+                tail += " Model coverage unsaturated."
         if coverage.unread:
-            tail += f" Unread review paths: {len(coverage.unread)}."
+            shown = ", ".join(coverage.unread[:16])
+            extra = len(coverage.unread) - 16
+            more = f" and {extra} more" if extra > 0 else ""
+            tail += f" Unread review paths: {len(coverage.unread)}. The paths are {shown}{more}."
+        skipped = [row for row in coverage.rows if row.model_state.startswith("skipped:")]
+        if skipped:
+            tail += f" Model skipped {len(skipped)}."
     if state.advisories == "queried" and state.advisory_note.startswith("Kept from the last OSV query"):
         tail += f" {state.advisory_note}"
     elif state.advisories == "queried":
@@ -111,6 +132,7 @@ def build_report(
     summary = redact(
         f"Silent Blue scanned {metrics.files} files ({metrics.bytes} bytes) in "
         f"{state.repo_name}. {metrics.findings} control gaps reported, "
+        f"{_product_phrase(findings)}, "
         f"{metrics.dropped} candidates dropped. {tail}"
     )
     return FinalReport(
@@ -334,6 +356,43 @@ def finding_lines(finding: Finding, index: int, repo_name: str = "") -> list[str
     return finding_markdown(finding, index, repo_name or "repository")
 
 
+def _annotate(finding: Finding, repo: Path, state_dir: Path) -> Finding:
+    """Set the path role and whether an owner confirm still matches the line."""
+
+    role = path_role(finding.file)
+    status = ""
+    if role == "test" and finding.rule_id == "hardcoded-secret" and finding.case_id:
+        status = confirm_status(
+            state_dir,
+            repo,
+            finding.case_id,
+            line_hash(repo, finding.file, finding.line),
+        )
+    return finding.model_copy(update={"role": role, "owner_confirm": status})
+
+
+def _product_phrase(findings: list[Finding]) -> str:
+    count = sum(1 for finding in findings if finding.role in {"", "product"})
+    noun = "product gap" if count == 1 else "product gaps"
+    return f"{count} {noun}"
+
+
+def coverage_status(state: RunState, name: str) -> str:
+    if name == "refute":
+        return state.refute_status
+    return state.miss_status
+
+
+def _pass_sentence(label: str, status: str) -> str:
+    if status == "not_started":
+        return f" {label} did not start."
+    if status == "finished":
+        return f" {label} finished."
+    if status == "stopped":
+        return f" {label} did not finish."
+    return ""
+
+
 def _present(finding: Finding, number: int) -> Finding:
     """Give every finding a report number, a CVSS pair, and a component."""
 
@@ -404,9 +463,17 @@ def _metrics(state: RunState, findings: list[Finding]) -> Metrics:
     if scope is not None:
         source_files = sum(1 for item in scope.files if is_source_path(item.path))
     reviewed = set(state.reviewed_units)
+    skipped = set(state.review_skips)
     files_reviewed = len(
-        {path for unit in state.units if unit.unit_id in reviewed for path in unit.paths}
+        {
+            path
+            for unit in state.units
+            if unit.unit_id in reviewed
+            for path in unit.paths
+            if path not in skipped
+        }
     )
+    listed = set(state.review_paths)
     model_paths = len(state.review_paths)
     model_paths_read = len(
         {
@@ -414,7 +481,7 @@ def _metrics(state: RunState, findings: list[Finding]) -> Metrics:
             for unit in state.units
             if unit.unit_id in reviewed
             for path in unit.paths
-            if path in set(state.review_paths)
+            if path in listed and path not in skipped
         }
     )
     if state.review_note or state.review_paths:

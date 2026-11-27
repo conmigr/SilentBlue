@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silentblue"
-version = "0.9.1"
+version = "0.9.3"
 description = "Defensive security harness for control-gap detection, ranking, reporting, review, and operations."
 readme = "README.md"
 authors = [{ name = "Jason Bevis" }]

@@ -56,7 +56,8 @@ def _prepare(workspace, replacement: dict):
         state_dir=workspace["state"],
         manifest_dir=workspace["manifests"],
     )
-    assert scanned.exit_code == 0
+    assert scanned.exit_code == 1
+    assert "release gate:" in scanned.message
     drafted = run_remediate(
         repo=workspace["repo"],
         manifest_dir=workspace["manifests"],

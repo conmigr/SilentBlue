@@ -63,6 +63,34 @@ _SH_TLS = re.compile(r"(?i)(?:curl|wget)\b.*(?:\s-k\b|--insecure)|SkipCertificat
 _PLAIN_CALL = re.compile(r"""(?i)(?:system|exec|popen|Function)\s*\(\s*['\"][^'\"]*['\"]\s*\)""")
 
 
+def mention_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
+    """Patterns that decide whether a language-rule hit is only a quotation."""
+
+    return {
+        "dynamic-eval": (_JS_FUNCTION, _RUBY_EVAL, _PHP_EVAL, _SH_EVAL),
+        "shell-command": (
+            _RUBY_SHELL,
+            _C_SHELL,
+            _RUST_SHELL,
+            _GO_SHELL,
+            _JAVA_SHELL,
+            _PHP_SHELL,
+            _CS_SHELL,
+        ),
+        "shell-enabled": (
+            _RUBY_SHELL,
+            _C_SHELL,
+            _RUST_SHELL,
+            _GO_SHELL,
+            _JAVA_SHELL,
+            _PHP_SHELL,
+            _CS_SHELL,
+        ),
+        "tls-verify-disabled": (_RUBY_TLS, _C_TLS, _RUST_TLS, _GO_TLS, _JAVA_TLS, _PHP_TLS, _CS_TLS, _SH_TLS),
+        "sql-unparameterized": (_RUST_SQL, _GO_SQL, _JAVA_SQL, _CS_SQL),
+    }
+
+
 def language_findings(path: str, number: int, line: str, language: str) -> list[Finding]:
     """Return control gaps that belong to this file's language."""
 
